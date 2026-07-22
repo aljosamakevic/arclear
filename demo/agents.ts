@@ -9,6 +9,9 @@ export interface AgentPersona {
   emoji: string;
   role: string;
   account: HDAccount;
+  /** Failure injection (D-13): when true the persona never answers a consent
+   * request — distinguishable from refusal-for-cause (verifyProposal ok:false). */
+  stalled: boolean;
 }
 
 /**
@@ -19,11 +22,11 @@ export interface AgentPersona {
 export function agents(mnemonic: string): AgentPersona[] {
   const mk = (i: number) => mnemonicToAccount(mnemonic, { addressIndex: i });
   return [
-    { name: "Crawler", emoji: "🕷️", role: "sells raw web data", account: mk(1) },
-    { name: "Summarizer", emoji: "📝", role: "sells summaries, buys data", account: mk(2) },
-    { name: "Oracle", emoji: "🔮", role: "sells signals, buys summaries", account: mk(3) },
-    { name: "Trader", emoji: "📈", role: "buys signals, sells fills", account: mk(4) },
-    { name: "Auditor", emoji: "🧾", role: "buys fills, sells reports to Crawler", account: mk(5) },
+    { name: "Crawler", emoji: "🕷️", role: "sells raw web data", account: mk(1), stalled: false },
+    { name: "Summarizer", emoji: "📝", role: "sells summaries, buys data", account: mk(2), stalled: false },
+    { name: "Oracle", emoji: "🔮", role: "sells signals, buys summaries", account: mk(3), stalled: false },
+    { name: "Trader", emoji: "📈", role: "buys signals, sells fills", account: mk(4), stalled: false },
+    { name: "Auditor", emoji: "🧾", role: "buys fills, sells reports to Crawler", account: mk(5), stalled: false },
   ];
 }
 
