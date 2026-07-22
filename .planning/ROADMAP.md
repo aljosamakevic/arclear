@@ -19,7 +19,7 @@ Arclear v2 evolves the shipped v1 netting primitive into a two-product clearing 
 - Integer phases (1, 2, 3): Planned milestone work
 - Decimal phases (2.1, 2.2): Urgent insertions (marked with INSERTED)
 
-- [ ] **Phase 1: Threshold Consent (brief Phase 0)** - Exclude-and-recompute rounds keep settling through unresponsive members; unanimity over the final executed set
+- [x] **Phase 1: Threshold Consent (brief Phase 0)** - Exclude-and-recompute rounds keep settling through unresponsive members; unanimity over the final executed set (completed 2026-07-22)
 - [ ] **Phase 2: Merkle Manifests & IOU Redemption (brief Phase 1)** - Sorted-leaf merkle manifest roots with inclusion/non-inclusion proofs and an on-chain `redeemIOU` recovery path
 - [ ] **Phase 3: Calibration Checkpoint (brief checkpoint)** - Sweep-driven decision gate: what member count threshold consent unlocks, what q/N margin params survive p10 rounds
 - [ ] **Phase 4: Novation — ArclearCCP.sol (brief Phase 2)** - Members face the hub; matched-book invariant holds under any novation/settlement sequence
@@ -61,7 +61,7 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
-- [ ] 01-05-PLAN.md — PROTOCOL.md griefing analysis, THREAT-MODEL reconciliation, Arc testnet V2 deploys + human verify (wave 4)
+- [x] 01-05-PLAN.md — PROTOCOL.md griefing analysis, THREAT-MODEL reconciliation, Arc testnet V2 deploys + human verify (wave 4)
 
 ### Phase 2: Merkle Manifests & IOU Redemption (brief Phase 1)
 
@@ -169,7 +169,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8. Ex
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Threshold Consent | 4/5 | In Progress|  |
+| 1. Threshold Consent | 5/5 | Complete   | 2026-07-22 |
 | 2. Merkle Manifests & IOU Redemption | 0/TBD | Not started | - |
 | 3. Calibration Checkpoint | 0/TBD | Not started | - |
 | 4. Novation — ArclearCCP.sol | 0/TBD | Not started | - |
