@@ -340,9 +340,10 @@ describe("collectConsents window (CONS-01)", () => {
       members.map((a, i) => [a.toLowerCase(), consentAfter(5, `0x0${i + 1}` as Hex)]),
     );
     const started = Date.now();
-    const out = await collectConsents(fakeProposal(members), [], providers, 50);
-    // Early completion clears the deadline timer — well before the window.
-    expect(Date.now() - started).toBeLessThan(45);
+    // WR-07: generous window + margin — the assertion proves early completion
+    // (timer cleared before the deadline), not a hard real-time bound.
+    const out = await collectConsents(fakeProposal(members), [], providers, 200);
+    expect(Date.now() - started).toBeLessThan(150);
     expect(out.consents.size).toBe(3);
     expect(out.refused).toEqual([]);
     expect(out.timedOut).toEqual([]);
@@ -391,16 +392,18 @@ describe("collectConsents window (CONS-01)", () => {
   });
 
   it("late consent after the snapshot mutates nothing (D-02)", async () => {
-    const windowMs = 25;
+    // WR-07: wide margins (100ms between deadline and the late consent) so a
+    // loaded event loop cannot reorder the deadline and the "late" provider.
+    const windowMs = 100;
     const providers = new Map<string, ConsentProvider>([
       [members[0].toLowerCase(), consentAfter(2, "0x01")],
       [members[1].toLowerCase(), consentAfter(2, "0x02")],
-      [members[2].toLowerCase(), consentAfter(windowMs + 20, "0x03")],
+      [members[2].toLowerCase(), consentAfter(windowMs + 100, "0x03")],
     ]);
     const out = await collectConsents(fakeProposal(members), [], providers, windowMs);
     expect(out.timedOut.map((a) => a.toLowerCase())).toEqual([members[2].toLowerCase()]);
     const before = new Map(out.consents);
-    await delay(40); // let the late provider settle — snapshot must be immutable
+    await delay(150); // let the late provider settle — snapshot must be immutable
     expect(out.consents).toEqual(before);
     expect(out.consents.size + out.refused.length + out.timedOut.length).toBe(members.length);
   });
