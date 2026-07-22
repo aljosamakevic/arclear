@@ -270,6 +270,39 @@ describe("verifyProposal with excluded set", () => {
       expect(check.ok).toBe(true);
     }
   });
+
+  it("WR-06: refuses a proposal whose roundNonce disagrees with the local chain view", async () => {
+    const ious = await threeMemberEconomy();
+    const proposal = buildProposal(HUB, 1n, net(ious, { now: NOW }));
+    const check = verifyProposal(HUB, proposal, ious, alice.address, {
+      now: NOW,
+      expectedRoundNonce: 0n,
+    });
+    expect(check.ok).toBe(false);
+    expect(check.reason).toMatch(/roundNonce mismatch/);
+    // Matching nonce verifies.
+    expect(
+      verifyProposal(HUB, proposal, ious, alice.address, { now: NOW, expectedRoundNonce: 1n }).ok,
+    ).toBe(true);
+  });
+
+  it("WR-06: refuses when consumedIds overlap an outstanding unconfirmed consent", async () => {
+    const ious = await threeMemberEconomy();
+    const proposal = buildProposal(HUB, 0n, net(ious, { now: NOW }));
+    const check = verifyProposal(HUB, proposal, ious, alice.address, {
+      now: NOW,
+      pendingConsumedIds: new Set<Hex>([proposal.consumedIds[0]]),
+    });
+    expect(check.ok).toBe(false);
+    expect(check.reason).toMatch(/outstanding unconfirmed consent/);
+    // A disjoint pending set verifies.
+    expect(
+      verifyProposal(HUB, proposal, ious, alice.address, {
+        now: NOW,
+        pendingConsumedIds: new Set<Hex>([("0x" + "ff".repeat(32)) as Hex]),
+      }).ok,
+    ).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------

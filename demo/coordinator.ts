@@ -452,7 +452,16 @@ export class Coordinator {
               proposal,
               openIous,
               persona.account.address,
-              { now, settledIds: this.settledIds, excluded, chainId: this.chainId },
+              {
+                now,
+                settledIds: this.settledIds,
+                excluded,
+                chainId: this.chainId,
+                // WR-06: pin the proposal to the round nonce read from chain.
+                // (Demo simplification: personas share the coordinator's read;
+                // real members read the hub's roundNonce themselves.)
+                expectedRoundNonce: roundNonce,
+              },
             );
             if (!check.ok) return { kind: "refusal", reason: `${persona.name}: ${check.reason}` };
             return {

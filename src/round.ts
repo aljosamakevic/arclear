@@ -102,14 +102,51 @@ export function rebuildProposal(
  * `opts.excluded` is out-of-band rebuild metadata folded into the local
  * recomputation: a coordinator lie about the excluded set produces a delta
  * mismatch or an explicit exclusion refusal, never a silent accept.
+ *
+ * WR-06 — double-consent hazard: on-chain safety binds each round
+ * individually, so a coordinator concurrently collecting consents for two
+ * overlapping proposals at nonces N and N+1 could settle the same paper
+ * twice. Participants MUST track their outstanding (signed but unconfirmed)
+ * consents: pass `opts.expectedRoundNonce` (the hub's live `roundNonce` as
+ * *you* read it) and `opts.pendingConsumedIds` (the union of consumedIds
+ * across your unconfirmed consents) to refuse such proposals as data.
  */
 export function verifyProposal(
   hub: Address,
   proposal: RoundProposal,
   myIous: SignedIou[],
   self: Address,
-  opts: { now: bigint; safetyWindowSeconds?: bigint; settledIds?: ReadonlySet<Hex>; excluded?: Address[]; chainId?: number },
+  opts: {
+    now: bigint;
+    safetyWindowSeconds?: bigint;
+    settledIds?: ReadonlySet<Hex>;
+    excluded?: Address[];
+    chainId?: number;
+    /** Refuse unless proposal.roundNonce matches the caller's own chain read. */
+    expectedRoundNonce?: bigint;
+    /** Consumed ids of the caller's outstanding unconfirmed consents. */
+    pendingConsumedIds?: ReadonlySet<Hex>;
+  },
 ): { ok: boolean; reason?: string } {
+  if (opts.expectedRoundNonce !== undefined && proposal.roundNonce !== opts.expectedRoundNonce) {
+    return {
+      ok: false,
+      reason: `roundNonce mismatch: proposal says ${proposal.roundNonce}, local chain view says ${opts.expectedRoundNonce}`,
+    };
+  }
+  if (opts.pendingConsumedIds !== undefined && opts.pendingConsumedIds.size > 0) {
+    const pending = new Set<string>();
+    for (const id of opts.pendingConsumedIds) pending.add(id.toLowerCase());
+    for (const id of proposal.consumedIds) {
+      if (pending.has(id.toLowerCase())) {
+        return {
+          ok: false,
+          reason: `consumed id ${id} overlaps an outstanding unconfirmed consent — double-settle risk`,
+        };
+      }
+    }
+  }
+
   const selfLc = self.toLowerCase();
   const excluded = opts.excluded ?? [];
   const ex = new Set(excluded.map((a) => a.toLowerCase()));
