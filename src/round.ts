@@ -66,6 +66,27 @@ export function buildProposal(
 }
 
 /**
+ * Pure exclude-and-recompute: drop every IOU touching an excluded member,
+ * re-net with the unchanged engine, and re-propose over the SAME roundNonce
+ * (nothing executed in pass 1). The excluded list is out-of-band coordinator
+ * metadata — never part of the signed Round struct (D-08). No division anywhere.
+ */
+export function rebuildProposal(
+  hub: Address,
+  roundNonce: bigint,
+  openIous: SignedIou[],
+  excluded: Address[],
+  opts: { now: bigint; safetyWindowSeconds?: bigint; settledIds?: ReadonlySet<Hex>; chainId?: number },
+): { proposal: RoundProposal; result: NetResult } {
+  const ex = new Set(excluded.map((a) => a.toLowerCase()));
+  const kept = openIous.filter(
+    (s) => !ex.has(s.iou.debtor.toLowerCase()) && !ex.has(s.iou.creditor.toLowerCase()),
+  );
+  const result = net(kept, opts);
+  return { proposal: buildProposal(hub, roundNonce, result, opts.chainId), result };
+}
+
+/**
  * Participant-side check before consenting: recompute the netting from the
  * IOUs *we* have seen and compare byte-for-byte with the proposal. Never trust
  * the coordinator's arithmetic — that distrust is what makes unanimity safe.
