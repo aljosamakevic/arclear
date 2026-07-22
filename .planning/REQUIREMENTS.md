@@ -9,10 +9,10 @@ Requirements for the v2 milestone (this roadmap). Derived 1:1 from `docs/V2-BRIE
 
 ### Threshold Consent (brief Phase 0)
 
-- [ ] **CONS-01**: Coordinator can propose a round over a *candidate* set and collect consents within a timeout window
-- [ ] **CONS-02**: On timeout, coordinator rebuilds the round from the consenting subset — excluded member's IOUs drop from the manifest, counterparties' deltas are recomputed, and everyone in the final set signs the final digest
-- [ ] **CONS-03**: Invariant holds and is tested: every settled balance movement was signed for by its owner over the exact executed position set
-- [ ] **CONS-04**: An IOU excluded in round n settles cleanly in round n+1, and the same IOU can never settle twice
+- [x] **CONS-01**: Coordinator can propose a round over a *candidate* set and collect consents within a timeout window
+- [x] **CONS-02**: On timeout, coordinator rebuilds the round from the consenting subset — excluded member's IOUs drop from the manifest, counterparties' deltas are recomputed, and everyone in the final set signs the final digest
+- [x] **CONS-03**: Invariant holds and is tested: every settled balance movement was signed for by its owner over the exact executed position set
+- [x] **CONS-04**: An IOU excluded in round n settles cleanly in round n+1, and the same IOU can never settle twice
 - [ ] **CONS-05**: Exclusion rounds are zero-sum after redistribution; griefing cost (repeated refusal = repeated rebuild latency, never a safety cost) is analyzed and documented
 - [x] **CONS-06**: `ClearingHubV2.sol` ships with the execution path mostly unchanged — the change lives in coordinator/SDK protocol and round-rebuild logic in `round.ts`
 
@@ -82,10 +82,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| CONS-01 | Phase 1 | Pending |
-| CONS-02 | Phase 1 | Pending |
-| CONS-03 | Phase 1 | Pending |
-| CONS-04 | Phase 1 | Pending |
+| CONS-01 | Phase 1 | Complete |
+| CONS-02 | Phase 1 | Complete |
+| CONS-03 | Phase 1 | Complete |
+| CONS-04 | Phase 1 | Complete |
 | CONS-05 | Phase 1 | Pending |
 | CONS-06 | Phase 1 | Complete |
 | MERK-01 | Phase 2 | Pending |

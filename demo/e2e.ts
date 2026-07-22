@@ -42,7 +42,12 @@ coordinator.addIous(ious);
 console.log(`[e2e] ${ious.length} IOUs signed off-chain (0 transactions so far)`);
 
 console.log("[e2e] running netting round …");
-const round = await coordinator.runRound(now());
+const roundResult = await coordinator.runRound(now());
+if (roundResult.outcome !== "settled") {
+  console.error(`[e2e] FAIL — round did not settle (${roundResult.outcome}): ${roundResult.reason}`);
+  process.exit(1);
+}
+const round = roundResult.round;
 
 // Assert: on-chain balance movement == engine deltas, to the base unit.
 let mismatches = 0;

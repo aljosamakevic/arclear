@@ -96,10 +96,12 @@ const server = createServer(async (req, res) => {
       return;
     }
     if (req.method === "POST" && req.url === "/round") {
-      const round = await coordinator.runRound(now());
-      printReport(round, env.explorerTx);
+      // Aborts are expected protocol behavior, not 500s (Pitfall 6) — the
+      // structured outcome is returned as-is; Plan 04 wires the dashboard view.
+      const result = await coordinator.runRound(now());
+      if (result.outcome === "settled") printReport(result.round, env.explorerTx);
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify(round));
+      res.end(JSON.stringify(result));
       return;
     }
     res.writeHead(404);
