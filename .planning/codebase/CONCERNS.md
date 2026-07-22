@@ -1,0 +1,341 @@
+# Codebase Concerns
+
+**Analysis Date:** 2026-07-22
+
+This document covers `arclear` v1 (the collateralized multilateral netting
+primitive). Overall code quality is high: the contract is ~180 lines with 26
+tests (unit + revert matrix + 512-run fuzz + TS↔Solidity digest parity), the
+SDK is fully typed with no `any` escapes, and the project's own
+`docs/THREAT-MODEL.md` and `docs/V2-BRIEF.md` already document known
+limitations candidly. This document does not repeat those (see them directly);
+it focuses on engineering-level concerns not already tracked there, plus a
+few points worth cross-referencing.
+
+## Tech Debt
+
+**In-memory-only coordinator state (no persistence):**
+- Issue: `Coordinator` (`demo/coordinator.ts:34-178`) holds `ious`, `settledIds`,
+  and `rounds` as plain in-process arrays/Sets with no disk or DB backing.
+  Restarting `demo/server.ts` loses all pending IOUs and round history.
+- Files: `demo/coordinator.ts`, `demo/server.ts`
+- Impact: acceptable for a demo/reference coordinator (documented as "holds no
+  keys and no authority"), but this is the piece any real deployment would
+  need to replace first — it's the availability-critical component per
+  `docs/THREAT-MODEL.md` row on "coordinator is a single relay".
+- Fix approach: not a v1 bug; flag explicitly if this coordinator is ever
+  pointed at real user funds rather than demo agents.
+
+**Unbounded growth of `Coordinator.ious` and `Coordinator.rounds`:**
+- Issue: `addIous` (`demo/coordinator.ts:51-53`) appends forever; nothing
+  prunes settled IOUs or caps `rounds` history. `state()` re-runs `net()` over
+  the *entire* history every poll (`demo/coordinator.ts:127`), not just open
+  IOUs, an O(n) scan that grows with total demo lifetime.
+- Files: `demo/coordinator.ts`
+- Impact: fine at demo scale (~100s of IOUs); would degrade for a long-running
+  process with thousands of rounds.
+- Fix approach: periodically compact `this.ious` to `openIous` after each
+  successful round; cap `rounds` to a rolling window for the dashboard.
+
+**`verifyProposal` computes but discards a partial check (`strangers`):**
+- Issue: `src/round.ts:94-99` computes `strangers` (consumed IOU ids the
+  caller never saw) and then explicitly voids it with a comment explaining
+  the check is incomplete: "we can't tell from ids alone" whether a stranger
+  id involves us. The reasoning in the comment is sound (each participant's
+  own delta already pins the sum of everything touching them), but the dead
+  variable is a signal that this validation path was scoped down mid-write
+  and never revisited.
+- Files: `src/round.ts:94-99`
+- Impact: none currently — delta comparison is the actual safety check and is
+  complete. But the unused variable makes the code read as unfinished, and if
+  a future refactor changes what `myIous` means (e.g., threshold-consent v2's
+  exclude-and-recompute), this stale reasoning should be re-verified rather
+  than carried forward unexamined.
+- Fix approach: either delete the dead computation or extend the comment to
+  explicitly state the invariant it currently *doesn't* check and why that's
+  fine, so a future editor doesn't have to re-derive it.
+
+**No `engines` field / pinned Node version:**
+- Issue: `package.json` declares no `engines.node`, despite the project being
+  ESM (`"type": "module"`), using top-level `await` in `demo/server.ts:28`,
+  and depending on modern `node:` protocol imports.
+- Files: `package.json`
+- Impact: low — works on any reasonably modern Node, but there's no guardrail
+  against a contributor running an old Node and hitting confusing ESM/TLA
+  errors.
+- Fix approach: add `"engines": { "node": ">=20" }` (or whatever minimum is
+  actually tested in CI, if any CI exists — none was found in this repo).
+
+**No CI pipeline detected:**
+- Issue: no `.github/workflows/`, no other CI config found at the repo root.
+  All test commands (`npm test`, `npm run test:contracts`) are documented in
+  the README as manual `git clone && npm install` steps.
+- Files: n/a (absence)
+- Impact: regressions in `contracts/src/ClearingHub.sol` or `src/netting.ts`
+  are only caught by a human running tests locally before commit/PR.
+- Fix approach: add a GitHub Actions workflow running `forge test` and
+  `vitest run` on push/PR — especially valuable given the v2 roadmap
+  (`docs/V2-BRIEF.md`) plans a new `ClearingHubV2.sol` and `ArclearCCP.sol`
+  sharing the settlement layer, which raises the risk of a change in one
+  contract silently breaking the TS↔Solidity digest parity test.
+
+## Known Bugs
+
+None identified in the v1 scope explored (contract logic, netting engine,
+EIP-712 signing, coordinator). The fuzz suite
+(`contracts/test/ClearingHubFuzz.t.sol`) explicitly asserts that arbitrary
+single-field perturbations of a valid round always revert
+(`testFuzz_perturbationAlwaysReverts`), and `DigestParity.t.sol` cross-checks
+the Solidity `hashRound` output against the TS `roundDigest` fixture
+(`test/fixtures/digest.json`, generated by `test/genFixture.ts`), which is the
+class of bug (encoding mismatch) most likely to slip through per-language unit
+tests alone.
+
+## Security Considerations
+
+**Fee-on-transfer / rebasing / non-standard ERC-20s unsupported (documented, not enforced):**
+- Risk: `ClearingHub.deposit` (`contracts/src/ClearingHub.sol:73-79`) assumes
+  `amount` transferred in equals `amount` received, crediting `collateral[msg.sender]`
+  with the requested `amount` regardless of actual balance delta. A
+  fee-on-transfer or rebasing token would let a depositor's on-chain
+  `collateral` mapping over-state real hub balance, eventually causing
+  `withdraw`/`executeRound` for *other* participants to revert with
+  insufficient real token balance even though the internal accounting says
+  otherwise.
+- Files: `contracts/src/ClearingHub.sol:73-79` (deposit), documented in the
+  contract's own NatSpec (line 31-32) and `docs/THREAT-MODEL.md` row 12.
+- Current mitigation: documentation only — no on-chain balance-delta check
+  (e.g., comparing `token.balanceOf(address(this))` before/after transfer).
+- Recommendation: if this hub is ever deployed for a token whose fee-on-transfer
+  status isn't contractually guaranteed (i.e., anything beyond the
+  known-vanilla USDC/EURC facades on Arc), add a balance-delta assertion in
+  `deposit` to fail closed rather than silently mis-accounting.
+
+**Owner key custody is out of scope but load-bearing:**
+- Risk: `Ownable2Step` owner can `pause()`/`unpause()` deposits and rounds
+  (`contracts/src/ClearingHub.sol:174-180`). Withdrawals are correctly never
+  pausable (the documented invariant), but a compromised owner key can still
+  freeze new deposits/settlement indefinitely (a liveness, not safety,
+  attack) — this is already listed in the threat model but worth flagging
+  operationally: no timelock or multisig is implied by the code, and
+  `constructor` sets `owner = msg.sender` (the deployer key) directly
+  (`contracts/src/ClearingHub.sol:68`).
+- Files: `contracts/src/ClearingHub.sol:68,174-180`
+- Recommendation: for any non-testnet deployment, put the owner behind a
+  multisig/timelock; document this as an operational requirement since the
+  contract itself has no such enforcement.
+
+**Demo dashboard renders server state via unescaped `innerHTML`:**
+- Risk: `public/dashboard.html` builds table rows with `innerHTML =
+  s.agents.map(...)`, `s.openIous...map(...)`, and `s.rounds.map(...)`
+  (`public/dashboard.html:120,134,142`) using template strings interpolated
+  directly from `/state` JSON, with no HTML-escaping helper. Currently the
+  only free-text-ish field surfaced is `ref` (a `bytes32` hex hash, not
+  attacker-controllable text) and hardcoded agent personas
+  (`demo/agents.ts:22-26`), so there is no live XSS vector today.
+- Files: `public/dashboard.html:120,134,142,159`
+- Impact: none in current use (localhost-only demo, no free-text user input
+  reaches these fields). Becomes a real risk the moment any field derived
+  from user-supplied data (e.g., a future free-text memo, or a `ref` decoded
+  to a human string) is rendered the same way.
+- Recommendation: if v2 or later ever surfaces free-text fields on the
+  dashboard, route them through `textContent` or an escaping helper before
+  interpolating into `innerHTML`.
+
+**Secrets handling — correct today, worth a standing reminder:**
+- `.env` is correctly gitignored (`.gitignore:2`) and confirmed untracked
+  (`git status --ignored` shows it as ignored, not staged); `DEPLOYER_PK` and
+  `AGENT_MNEMONIC` are the two secret-bearing env vars
+  (`.env.example`). No hardcoded secrets were found in source. The one
+  mnemonic embedded in source (`demo/agents.ts:5`, Anvil's public default
+  test mnemonic) is intentionally public and used only for local anvil runs —
+  not a concern, but worth confirming it never gets confused with
+  `AGENT_MNEMONIC` in a real deployment (`demo/setup.ts` correctly reads
+  `AGENT_MNEMONIC` from env in `setupTestnet`, only falling back to
+  `ANVIL_MNEMONIC` in `setupAnvil`).
+
+## Performance Bottlenecks
+
+**Full re-netting on every dashboard poll:**
+- Problem: `Coordinator.state()` (`demo/coordinator.ts:125-177`) calls
+  `net(this.ious, ...)` — a full pass over *all* IOUs ever added, not just
+  open ones — on every `/state` request, which the dashboard polls
+  continuously.
+- Files: `demo/coordinator.ts:127`
+- Cause: `net()` is O(n) in total IOU count and is not memoized between
+  polls; acceptable at demo volume (~100s of IOUs) but wasteful at scale.
+- Improvement path: memoize the netting preview, invalidate only when
+  `addIous`/`runRound` mutate state, or restrict the preview computation to
+  `openIous` plus incremental deltas.
+
+**Sequential per-agent on-chain calls in `depositAll` / `setupTestnet`:**
+- Problem: `demo/setup.ts:42-77` and `:156-177` await each agent's
+  approve/deposit or balance-check/transfer transaction serially in a
+  `for...of` loop rather than batching or parallelizing.
+- Files: `demo/setup.ts`
+- Cause: simplicity over throughput; fine for 5 demo agents, would not scale
+  to a larger simulated pool (the project's own `docs/sweep` findings show
+  the interesting compression numbers appear at n=15-50 participants).
+- Improvement path: batch via multicall (an `IMulticall3` interface is
+  already vendored in `contracts/out/IMulticall3.sol` via forge-std/dependencies)
+  or parallelize independent per-agent calls with `Promise.all`.
+
+## Fragile Areas
+
+**Netting engine's implicit sort-order coupling between `src/netting.ts` and the contract:**
+- Files: `src/netting.ts:55` (`sortedAddrs = [...positions.keys()].sort()`),
+  `contracts/src/ClearingHub.sol:120-123` (strictly-ascending on-chain check)
+- Why fragile: the on-chain contract *enforces* strict ascending order and
+  reverts otherwise (`ParticipantsNotStrictlyAscending`), but that invariant
+  lives entirely in the off-chain netting engine's use of JS default string
+  sort on lowercase hex addresses (comment at `src/netting.ts:55` notes "hex
+  lexicographic == numeric" as the reason this is safe). Any future change to
+  how addresses are represented (e.g., checksummed instead of lowercased
+  before sort) would silently break ordering and cause on-chain reverts that
+  are hard to trace back to the sort call.
+- Safe modification: never sort on `original` (checksummed) addresses; always
+  sort on the lowercased map keys as done today. Add an explicit unit test
+  asserting sort order survives mixed-case input if this code changes.
+- Test coverage: covered indirectly by `test/netting.test.ts`'s shuffle-determinism
+  property test, but there's no test that explicitly asserts checksum-case
+  addresses sort identically to lowercase — a targeted regression test would
+  close this gap cheaply.
+
+**`domain()` chainId default silently pins to Arc Testnet:**
+- Files: `src/domain.ts:36-43`
+- Why fragile: `domain(hub, chainId = ARC_TESTNET_CHAIN_ID)` — every signing
+  and verification call path (`src/iou.ts`, `src/round.ts`) that omits
+  `chainId` silently signs/verifies against chain 5042002. If this SDK is
+  ever reused against a different chain (mainnet Arc, or an unrelated EVM
+  chain) and a caller forgets to pass `chainId` explicitly in just one of the
+  sign/verify call sites, signatures will validate against the wrong domain
+  with no error — a replay-safety-relevant defaulting choice.
+  `docs/THREAT-MODEL.md` row 2 covers cross-chain replay defense generally
+  but doesn't call out this specific silent-default footgun.
+- Safe modification: when adding a new chain (mainnet Arc, or a v2 target),
+  make `chainId` a required parameter everywhere rather than optional, or add
+  a lint/test asserting every call site passes it explicitly.
+
+**Gas-limit hardcoding on Arc writes:**
+- Files: `src/client.ts:78-79,91-92,116` (`gas: 200_000n` / `1_500_000n`),
+  `demo/setup.ts:54-55` (`gas: 200_000n`)
+- Why fragile: the whole reason these limits exist is documented ("Gas-token
+  gotcha" in README and V2-BRIEF) — letting gas estimation run on Arc reserves
+  the whole USDC balance and causes simulated transfers to revert. But the
+  specific numeric limits (200_000 / 1_500_000) are not derived from any
+  profiling artifact in-repo; they're empirical constants. `executeRound`'s
+  gas cost scales with participant count (loops twice over `n` in
+  `contracts/src/ClearingHub.sol:120-145`), so the hardcoded `1_500_000n` cap
+  in `client.ts:116` will silently become insufficient once round size grows
+  well past demo scale (5 agents), causing out-of-gas reverts with no
+  automatic scaling.
+- Safe modification: scale the gas limit with `participants.length` (e.g., a
+  base cost plus a per-participant multiplier) rather than a fixed constant,
+  especially before the v2 threshold-consent work increases typical round
+  size.
+
+## Scaling Limits
+
+**Unanimous consent liveness ceiling (already the project's own top finding):**
+- Current capacity: the project's own sweep data (`docs/sweep/sweep.csv`,
+  summarized in README "Measured compression") shows that the *value* of
+  netting grows with pool size (n=15-50), but v1's unanimous-consent model
+  means one non-responsive participant among n stalls the entire round —
+  the larger the pool, the higher the chance of at least one such
+  participant.
+- Limit: no formal cap, but liveness risk grows with n under unanimity; this
+  is exactly the finding that motivates `docs/V2-BRIEF.md` Phase 0
+  (threshold consent) as the first v2 priority.
+- Scaling path: already planned — exclude-and-recompute threshold consent
+  (`docs/V2-BRIEF.md` Phase 0). Not a v1 defect, but the single largest
+  scaling limit in the current design and worth listing here since it drives
+  the entire v2 roadmap.
+
+**Coordinator is a single process, single point of failure for round assembly:**
+- Current capacity: one coordinator instance per demo run; no
+  redundancy/failover.
+- Limit: if the coordinator process crashes mid-round (after collecting some
+  consents but before `executeRound` lands), in-flight signatures are lost
+  (not persisted) and must be re-collected from scratch — a liveness cost,
+  not a safety one (per the threat model, safety is fully on-chain).
+- Scaling path: `docs/THREAT-MODEL.md` already notes "any participant can run
+  one; gossip is a drop-in replacement" as the v2 direction. No code changes
+  needed for this document beyond flagging that persistence/redundancy for
+  the reference coordinator implementation doesn't exist yet.
+
+## Dependencies at Risk
+
+None identified as urgent. Dependency surface is small and pinned to
+reasonably current majors:
+- `viem ^2.21.0` (only runtime dependency) — actively maintained, no known
+  advisories at time of writing.
+- `contracts/lib/openzeppelin-contracts` and `contracts/lib/forge-std` are
+  git submodules/vendored libs (not npm-audited); no version pin visible
+  beyond whatever commit is checked into `contracts/lib/` — worth confirming
+  these are pinned to tagged releases rather than tracking a moving branch
+  before any production deployment.
+- No `package-lock.json` drift issues detected; lockfile is present and
+  committed.
+
+## Missing Critical Features
+
+Per the project's own `docs/V2-BRIEF.md`, these are intentional v1 scope
+exclusions, not oversights, and are already prioritized:
+- Threshold consent (liveness under partial non-response) — Phase 0.
+- On-chain IOU redemption against a defaulter's collateral (currently only
+  socially recoverable, bounded by off-chain credit caps) — Phase 1.
+- Novation, margin, and default waterfall (v1 is fully collateralized and
+  consensual; it is not a CCP) — Phases 2-4.
+- Cross-currency (USDC/EURC) atomic settlement — Phase 6.
+
+Not tracked in V2-BRIEF but notable from this pass:
+- No membership/registry gate: "depositing is joining" per contract NatSpec
+  (`contracts/src/ClearingHub.sol:72`) — anyone can deposit and become a
+  netting participant with no admission control. Fine for a permissionless
+  netting primitive (explicitly the design), flagged again here only because
+  Phase 5 (Membership & governance) of V2-BRIEF changes this and the
+  transition point is worth remembering when it lands.
+
+## Test Coverage Gaps
+
+**No test for gas-limit sufficiency at larger round sizes:**
+- What's not tested: `src/client.ts`'s hardcoded `gas: 1_500_000n` for
+  `executeRound` is never tested against a round with more than the demo's 5
+  participants; there's no test asserting the gas limit scales or fails
+  gracefully as `participants.length` grows.
+- Files: `src/client.ts:96-118`, `contracts/test/ClearingHubFuzz.t.sol`
+- Risk: an operator running a larger netting round (which is precisely where
+  the project's own sweep data says the value concentrates) could hit
+  a silent out-of-gas revert with the current SDK defaults.
+- Priority: Medium — not a safety bug (execution reverts cleanly), but a
+  usability gap that will surface exactly when the product is used at its
+  most valuable scale.
+
+**No explicit case-sensitivity regression test for address sorting:**
+- What's not tested: `test/netting.test.ts` uses lowercase-only synthetic
+  addresses (`src/netting.ts` test fixtures use `0x0...01` etc., inherently
+  lowercase), so the "hex lexicographic == numeric" sort-order assumption
+  documented at `src/netting.ts:55` is never exercised with mixed-case
+  checksummed input.
+- Files: `test/netting.test.ts`
+- Risk: low today (addresses are lowercased before sorting), but a latent
+  regression if `original`/checksummed values are ever sorted directly.
+- Priority: Low.
+
+**No integration test for coordinator crash-and-recover mid-round:**
+- What's not tested: the liveness-under-partial-failure scenario that
+  `docs/THREAT-MODEL.md` explicitly calls out as v1's accepted trade-off
+  ("one unresponsive participant stalls a round") has unit-level coverage
+  for the on-chain revert path, but no test exercises the coordinator's
+  actual in-memory state after a mid-collection failure (e.g., what
+  `Coordinator.phase`/`lastError` end up as, and whether a subsequent
+  `runRound` call correctly re-includes the previously-uncollected IOUs).
+- Files: `demo/coordinator.ts`
+- Risk: low (this is demo-tier code, not the trust-critical path), but
+  becomes more important once Phase 0 (threshold consent / round-rebuild
+  logic) lands, since that logic lives in exactly this file per
+  `docs/V2-BRIEF.md`.
+- Priority: Low today, will become Medium once v2 Phase 0 work starts.
+
+---
+
+*Concerns audit: 2026-07-22*
