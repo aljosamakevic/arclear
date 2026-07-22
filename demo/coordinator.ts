@@ -471,6 +471,17 @@ export class Coordinator {
         if (receipt.status !== "success") {
           // Definitively mined-and-reverted: nothing executed, nothing pending.
           this.pendingSubmission = undefined;
+          // WR-02: classify a nonce race from chain state, not error strings —
+          // the explicit gas limit skips simulation, so no decoded custom
+          // error ever reaches us. A nonce that moved past ours means a
+          // concurrent round executed: expected protocol behavior, not a fault.
+          const onChainNonce = await this.hubClient.roundNonce();
+          if (onChainNonce !== proposal.roundNonce) {
+            throw new Error(
+              `WrongRoundNonce: on-chain nonce is ${onChainNonce}, submitted round used ` +
+                `${proposal.roundNonce} — a concurrent round executed (tx ${txHash})`,
+            );
+          }
           throw new Error(`tx reverted: ${txHash}`);
         }
         return txHash;
@@ -543,6 +554,7 @@ export class Coordinator {
       const msg = e instanceof Error ? e.message : String(e);
       // Pitfall 4: a concurrent round advanced the nonce between passes —
       // expected protocol behavior, not a fault. Next round is a fresh pass 1.
+      // The marker is produced by submit's own chain-state check (WR-02).
       if (msg.includes("WrongRoundNonce")) {
         this.phase = "aborted";
         this.phaseDetail = "stale roundNonce — a concurrent round executed";
