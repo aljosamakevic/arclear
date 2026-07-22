@@ -399,13 +399,19 @@ const arbRefusingReal = fc.subarray(REAL_ADDRS, { maxLength: REAL_ADDRS.length -
 
 /**
  * Provider harness: stalled → never resolve; refusing → refusal outcome;
+ * badSignature → prompt "consent" carrying garbage signature bytes (CR-01);
  * honest → verifyProposal (passing the excluded list through to
  * opts.excluded — exercising the Plan 01 seam end-to-end) then signConsent.
  * `stalledPass2` members answer pass 1 but stall once an excluded list exists.
  */
 function mkProviders(
   accounts: typeof ACCOUNTS,
-  behavior: { stalled?: Address[]; refusing?: Address[]; stalledPass2?: Address[] },
+  behavior: {
+    stalled?: Address[];
+    refusing?: Address[];
+    stalledPass2?: Address[];
+    badSignature?: Address[];
+  },
   hub: Address,
   ious: SignedIou[],
   settledIds: ReadonlySet<Hex>,
@@ -414,6 +420,7 @@ function mkProviders(
   const stalled = new Set((behavior.stalled ?? []).map((a) => a.toLowerCase()));
   const refusing = new Set((behavior.refusing ?? []).map((a) => a.toLowerCase()));
   const stalledPass2 = new Set((behavior.stalledPass2 ?? []).map((a) => a.toLowerCase()));
+  const badSignature = new Set((behavior.badSignature ?? []).map((a) => a.toLowerCase()));
   const providers = new Map<string, ConsentProvider>();
   for (const account of accounts) {
     const key = account.address.toLowerCase();
@@ -424,6 +431,13 @@ function mkProviders(
       }
       if (refusing.has(key)) {
         return Promise.resolve<ConsentOutcome>({ kind: "refusal", reason: "injected refusal" });
+      }
+      if (badSignature.has(key)) {
+        // Prompt, well-formed outcome — but the signature bytes are garbage.
+        return Promise.resolve<ConsentOutcome>({
+          kind: "consent",
+          signature: ("0x" + "de".repeat(65)) as Hex,
+        });
       }
       return (async (): Promise<ConsentOutcome> => {
         const check = verifyProposal(hub, proposal, ious, account.address, {
@@ -686,5 +700,58 @@ describe("two-pass state machine", () => {
     expect(outcome.reason).toMatch(/pass 2/);
     expect(calls.length).toBe(0);
     expect(settledIds.size).toBe(0);
+  });
+
+  it("CR-01: garbage consent signature is demoted to refusal — round settles in 2 passes without the attacker", async () => {
+    const [a, b, c, d] = ACCOUNTS;
+    const ious = [
+      fakeIou(a.address, b.address, 100n, 1n),
+      fakeIou(b.address, c.address, 50n, 1n),
+      fakeIou(c.address, a.address, 30n, 1n),
+      fakeIou(a.address, d.address, 10n, 1n),
+    ];
+    const settledIds = new Set<Hex>();
+    // d answers promptly with a well-formed consent whose signature is garbage.
+    const providers = mkProviders(ACCOUNTS, { badSignature: [d.address] }, HUB, ious, settledIds, {
+      now: NOW,
+    });
+    const { calls, submit } = mkSubmit();
+    const outcome = await attemptRound({
+      hub: HUB,
+      roundNonce: 0n,
+      openIous: ious,
+      settledIds,
+      providers,
+      windowMs: 50,
+      now: NOW,
+      submit,
+    });
+    // The invalid signature never reaches the chain: pass 1 demotes it to a
+    // refusal, the exclusion batch picks d up, and pass 2 settles without them.
+    expect(outcome.outcome).toBe("settled");
+    if (outcome.outcome !== "settled") return;
+    expect(outcome.passCount).toBe(2);
+    expect(outcome.excluded.map((x) => x.toLowerCase())).toEqual([d.address.toLowerCase()]);
+    expect(outcome.pass1.refused).toEqual([
+      { address: d.address, reason: "invalid consent signature" },
+    ]);
+    expect(outcome.pass1.timedOut).toEqual([]);
+
+    // Exactly one submit, attacker absent, and every submitted signature verifies.
+    expect(calls.length).toBe(1);
+    const { proposal, signatures } = calls[0];
+    expect(proposal.participants.map((p) => p.toLowerCase())).not.toContain(
+      d.address.toLowerCase(),
+    );
+    for (let i = 0; i < proposal.participants.length; i++) {
+      expect(await verifyConsent(HUB, proposal, proposal.participants[i], signatures[i])).toBe(
+        true,
+      );
+    }
+
+    // D-07: an invalid signature is refusal-for-cause — miss counter untouched.
+    const missed = new Map<string, number>([[d.address.toLowerCase(), 1]]);
+    applyMissSemantics(missed, outcome.pass1);
+    expect(missed.get(d.address.toLowerCase())).toBe(1);
   });
 });

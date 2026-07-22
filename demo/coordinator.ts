@@ -1,7 +1,13 @@
 import type { Address, Hex } from "viem";
 import type { PublicClient, WalletClient } from "viem";
 import { net } from "../src/netting.js";
-import { buildProposal, rebuildProposal, signConsent, verifyProposal } from "../src/round.js";
+import {
+  buildProposal,
+  rebuildProposal,
+  signConsent,
+  verifyConsent,
+  verifyProposal,
+} from "../src/round.js";
 import { HubClient } from "../src/client.js";
 import type { NetResult, RoundProposal, SignedIou } from "../src/types.js";
 import type { AgentPersona } from "./agents.js";
@@ -109,6 +115,38 @@ export async function collectConsents(
 }
 
 /**
+ * CR-01 guard: demote every collected consent whose signature does not verify
+ * against the proposal digest to a refusal-for-cause. An attacker answering
+ * with garbage (or someone else's) signature is thereby excluded through the
+ * normal exclude-and-recompute machinery instead of causing an on-chain
+ * BadSignature revert — and, per D-07, never advances the miss counter.
+ * `submit` must only ever see a signature set that passed this screen.
+ */
+export async function screenConsents(
+  hub: Address,
+  proposal: RoundProposal,
+  collection: ConsentCollection,
+  chainId?: number,
+): Promise<ConsentCollection> {
+  const consents = new Map<string, Hex>();
+  const refused = [...collection.refused];
+  for (const participant of proposal.participants) {
+    const key = participant.toLowerCase();
+    const signature = collection.consents.get(key);
+    if (signature === undefined) continue;
+    let ok: boolean;
+    try {
+      ok = await verifyConsent(hub, proposal, participant, signature, chainId);
+    } catch {
+      ok = false; // malformed signature bytes — refusal-equivalent, never a throw
+    }
+    if (ok) consents.set(key, signature);
+    else refused.push({ address: participant, reason: "invalid consent signature" });
+  }
+  return { consents, refused, timedOut: collection.timedOut };
+}
+
+/**
  * Miss-counter semantics D-06/D-07 over one collection outcome: timeout →
  * increment, consent → reset to 0, refusal → unchanged (refusal is the safety
  * mechanism working, not unresponsiveness). Mutates and returns `missed`
@@ -185,7 +223,13 @@ export async function attemptRound(args: {
   const proposal = buildProposal(hub, roundNonce, result, chainId);
 
   args.onPhase?.("collecting-consents", `pass 1: ${proposal.participants.length} members`);
-  const pass1 = await collectConsents(proposal, [], providers, windowMs);
+  // CR-01: every collected signature is locally verified before it can count.
+  const pass1 = await screenConsents(
+    hub,
+    proposal,
+    await collectConsents(proposal, [], providers, windowMs),
+    chainId,
+  );
 
   if (pass1.consents.size === proposal.participants.length) {
     // Signatures index-aligned with participants — the contract recovers per index.
@@ -215,7 +259,14 @@ export async function attemptRound(args: {
     "collecting-consents-pass-2",
     `pass 2: ${rebuilt.result.participants.length} members`,
   );
-  const pass2 = await collectConsents(rebuilt.proposal, excluded, providers, windowMs);
+  // CR-01: an invalid pass-2 signature is a refusal → the incompleteness
+  // branch below aborts cleanly (D-03) instead of reverting on-chain.
+  const pass2 = await screenConsents(
+    hub,
+    rebuilt.proposal,
+    await collectConsents(rebuilt.proposal, excluded, providers, windowMs),
+    chainId,
+  );
 
   if (pass2.consents.size !== rebuilt.proposal.participants.length) {
     // D-03: any pass-2 stall or refusal aborts cleanly — never a third collection.
