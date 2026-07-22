@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Arclear — netting clearinghouse on Arc</title>
+<style>
+  :root {
+    --bg: #0b0e14; --panel: #131826; --panel2: #0f1420; --line: #232b3d;
+    --text: #e6eaf2; --dim: #8b94a8; --green: #34d399; --red: #f87171;
+    --accent: #60a5fa; --amber: #fbbf24; --mono: "SF Mono", ui-monospace, Menlo, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: var(--bg); color: var(--text); font: 15px/1.5 -apple-system, "Segoe UI", sans-serif; padding: 28px 20px 60px; }
+  .wrap { max-width: 1060px; margin: 0 auto; }
+  header { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin-bottom: 22px; }
+  h1 { font-size: 26px; letter-spacing: -0.5px; }
+  h1 span { color: var(--accent); }
+  .badge { font: 12px var(--mono); color: var(--dim); background: var(--panel); border: 1px solid var(--line); border-radius: 20px; padding: 3px 10px; }
+  .hero { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 14px; }
+  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; }
+  .stat .label { font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: var(--dim); margin-bottom: 6px; }
+  .stat .value { font: 600 26px var(--mono); }
+  .stat .sub { font-size: 12px; color: var(--dim); margin-top: 4px; }
+  .compression .value { color: var(--green); }
+  .controls { display: flex; gap: 10px; align-items: center; margin: 18px 0 22px; flex-wrap: wrap; }
+  button { background: var(--accent); border: 0; color: #0b0e14; font: 600 14px inherit; padding: 10px 18px; border-radius: 9px; cursor: pointer; }
+  button.secondary { background: var(--panel); color: var(--text); border: 1px solid var(--line); }
+  button:disabled { opacity: 0.45; cursor: wait; }
+  .phase { font: 13px var(--mono); color: var(--amber); }
+  .phase a { color: var(--green); }
+  .grid { display: grid; grid-template-columns: 3fr 2fr; gap: 14px; align-items: start; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+  .panel h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 1px; color: var(--dim); padding: 12px 16px; border-bottom: 1px solid var(--line); }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th { text-align: right; font-size: 11px; text-transform: uppercase; letter-spacing: 0.8px; color: var(--dim); padding: 8px 14px; border-bottom: 1px solid var(--line); }
+  th:first-child { text-align: left; }
+  td { padding: 9px 14px; border-bottom: 1px solid var(--panel2); text-align: right; font-family: var(--mono); font-size: 13px; }
+  td:first-child { text-align: left; font-family: inherit; }
+  tr:last-child td { border-bottom: 0; }
+  .pos { color: var(--green); } .neg { color: var(--red); } .zero { color: var(--dim); }
+  .feed { max-height: 330px; overflow-y: auto; }
+  .iou { display: flex; justify-content: space-between; gap: 8px; padding: 7px 14px; border-bottom: 1px solid var(--panel2); font: 13px var(--mono); }
+  .iou .who { color: var(--dim); }
+  .rounds td a { color: var(--accent); text-decoration: none; }
+  .muted { color: var(--dim); font-size: 13px; padding: 14px 16px; }
+  .addr { font: 11px var(--mono); color: var(--dim); }
+  @media (max-width: 860px) { .hero { grid-template-columns: repeat(2, 1fr); } .grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>⚖️ arc<span>lear</span></h1>
+    <span class="badge" id="chainBadge">connecting…</span>
+    <span class="badge" id="hubBadge"></span>
+  </header>
+
+  <div class="hero">
+    <div class="stat"><div class="label">Gross obligations</div><div class="value" id="gross">—</div><div class="sub" id="iouCount">0 IOUs open</div></div>
+    <div class="stat"><div class="label">Would settle on-chain</div><div class="value" id="settled">—</div><div class="sub">net residuals only</div></div>
+    <div class="stat compression"><div class="label">Capital compression</div><div class="value" id="compression">—</div><div class="sub">value that nets away</div></div>
+    <div class="stat"><div class="label">Settlement txs</div><div class="value" id="txCount">0</div><div class="sub" id="txSub">payments → transactions</div></div>
+  </div>
+
+  <div class="controls">
+    <button id="simulateBtn">▶ Simulate traffic</button>
+    <button id="roundBtn" class="secondary">⚖ Run netting round</button>
+    <span class="phase" id="phase"></span>
+  </div>
+
+  <div class="grid">
+    <div class="panel">
+      <h2>Agent positions</h2>
+      <table id="positions">
+        <thead><tr><th>Agent</th><th>Paid out</th><th>Received</th><th>Net</th><th>Collateral</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="panel">
+      <h2>IOU feed <span id="feedCount"></span></h2>
+      <div class="feed" id="feed"><div class="muted">No IOUs yet — press “Simulate traffic”.</div></div>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-top:14px">
+    <h2>Executed rounds</h2>
+    <table class="rounds" id="rounds">
+      <thead><tr><th>#</th><th>IOUs</th><th>Gross</th><th>Settled</th><th>Compression</th><th>Tx</th></tr></thead>
+      <tbody><tr><td colspan="6" class="muted">No rounds executed yet.</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const usd = (base) => "$" + (Number(BigInt(base)) / 1e6).toFixed(2);
+const short = (a) => a.slice(0, 6) + "…" + a.slice(-4);
+let agentByAddr = {};
+
+async function poll() {
+  try {
+    const s = await (await fetch("/state")).json();
+    agentByAddr = Object.fromEntries(s.agents.map((a) => [a.address.toLowerCase(), a]));
+
+    $("chainBadge").textContent = s.chainId === 5042002 ? "Arc Testnet · 5042002" : `local anvil · ${s.chainId}`;
+    $("hubBadge").textContent = "hub " + short(s.hub);
+
+    const gross = BigInt(s.preview.grossVolume);
+    const settled = BigInt(s.preview.settledVolume);
+    $("gross").textContent = usd(gross);
+    $("settled").textContent = usd(settled);
+    $("compression").textContent = gross === 0n ? "—"
+      : (Number((gross - settled) * 1000n / gross) / 10).toFixed(1) + "%";
+    $("iouCount").textContent = `${s.openIouCount} IOUs open · ${s.totalIouCount} total`;
+    $("txCount").textContent = s.rounds.length;
+    const settledIous = s.rounds.reduce((n, r) => n + r.iouCount, 0);
+    $("txSub").textContent = `${settledIous} payments → ${s.rounds.length} transactions`;
+
+    $("positions").querySelector("tbody").innerHTML = s.agents.map((a) => {
+      const net = BigInt(a.netDelta);
+      const cls = net > 0n ? "pos" : net < 0n ? "neg" : "zero";
+      const sign = net > 0n ? "+" : "";
+      return `<tr>
+        <td>${a.emoji} <b>${a.name}</b><br><span class="addr">${short(a.address)} · ${a.role}</span></td>
+        <td class="neg">${usd(a.grossOut)}</td>
+        <td class="pos">${usd(a.grossIn)}</td>
+        <td class="${cls}">${sign}${usd(net < 0n ? -net : net) === "$0.00" && net === 0n ? "$0.00" : (net < 0n ? "−" : "") + usd(net < 0n ? -net : net).slice(net < 0n ? 0 : 0)}</td>
+        <td>${usd(a.collateral)}</td>
+      </tr>`;
+    }).join("");
+
+    if (s.openIous.length) {
+      $("feed").innerHTML = s.openIous.slice().reverse().map((i) => {
+        const d = agentByAddr[i.debtor.toLowerCase()], c = agentByAddr[i.creditor.toLowerCase()];
+        return `<div class="iou"><span class="who">${d ? d.emoji + " " + d.name : short(i.debtor)} → ${c ? c.emoji + " " + c.name : short(i.creditor)}</span><span>${usd(i.amount)}</span></div>`;
+      }).join("");
+      $("feedCount").textContent = `· showing last ${s.openIous.length}`;
+    }
+
+    if (s.rounds.length) {
+      $("rounds").querySelector("tbody").innerHTML = s.rounds.map((r) => {
+        const g = BigInt(r.grossVolume), st = BigInt(r.settledVolume);
+        const comp = g === 0n ? "—" : (Number((g - st) * 1000n / g) / 10).toFixed(1) + "%";
+        const link = s.explorerBase
+          ? `<a href="${s.explorerBase}/tx/${r.txHash}" target="_blank">${short(r.txHash)} ↗</a>`
+          : short(r.txHash);
+        return `<tr><td>${r.roundNonce}</td><td>${r.iouCount}</td><td>${usd(g)}</td><td>${usd(st)}</td><td class="pos">${comp}</td><td>${link}</td></tr>`;
+      }).join("");
+    }
+
+    const phases = {
+      "idle": "", "netting": "⏳ computing net positions…",
+      "collecting-consents": "✍️ " + s.phaseDetail,
+      "submitting": "📡 submitting settlement…",
+      "confirmed": "✅ settled · " + (s.explorerBase ? `<a href="${s.explorerBase}/tx/${s.phaseDetail}" target="_blank">view on ArcScan ↗</a>` : short(s.phaseDetail)),
+      "failed": "❌ " + (s.lastError ?? "failed"),
+    };
+    $("phase").innerHTML = (s.simulating ? "🌀 traffic streaming… " : "") + (phases[s.phase] ?? "");
+  } catch (e) { $("phase").textContent = "⚠ server unreachable"; }
+}
+
+$("simulateBtn").onclick = async () => { await fetch("/simulate", { method: "POST" }); };
+$("roundBtn").onclick = async () => {
+  $("roundBtn").disabled = true;
+  try { await fetch("/round", { method: "POST" }); } finally { $("roundBtn").disabled = false; }
+};
+
+poll();
+setInterval(poll, 1500);
+</script>
+</body>
+</html>

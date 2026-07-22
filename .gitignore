@@ -1,0 +1,13 @@
+# secrets — never commit; ARC_RPC_URL and keys live here
+.env
+.env.local
+
+node_modules/
+dist/
+
+# foundry
+contracts/out/
+contracts/cache/
+contracts/broadcast/**/dry-run/
+
+.DS_Store
