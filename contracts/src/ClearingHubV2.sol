@@ -22,10 +22,11 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 /// @dev    Near-verbatim copy of ClearingHub.sol: same EIP-712 domain
 ///         ("ArcClearingHub", "1"), same ROUND_TYPEHASH, same errors, events,
 ///         and checks — digest parity with the v1 fixture is machine-checked
-///         in ClearingHubV2Parity.t.sol. `manifestHash` now carries the sorted
-///         -leaf merkle root of consumed IOU ids (same bytes32 slot, richer
-///         commitment). No owner access to funds, no upgradeability, no fees;
-///         `pause` gates deposits and rounds but never withdrawal.
+///         in ClearingHubV2Parity.t.sol. `manifestHash` carries the keccak256
+///         of the sorted consumed-IOU-id list (same bytes32 slot as v1; a
+///         later phase swaps in a sorted-leaf merkle root without touching
+///         the contract). No owner access to funds, no upgradeability, no
+///         fees; `pause` gates deposits and rounds but never withdrawal.
 contract ClearingHubV2 is EIP712, Ownable2Step, Pausable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
