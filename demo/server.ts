@@ -5,10 +5,11 @@
  *   npm run demo -- --anvil → fully local
  *
  * Endpoints:
- *   GET  /            dashboard
- *   GET  /state       full JSON state for the dashboard
- *   POST /simulate    generate a burst of ~35 signed IOUs
- *   POST /round       run a netting round on-chain
+ *   GET  /                    dashboard
+ *   GET  /state               full JSON state for the dashboard
+ *   POST /simulate            generate a burst of ~35 signed IOUs
+ *   POST /round               run a netting round on-chain (aborts are 200s)
+ *   POST /stall?agent=Name    toggle a persona's stall flag (failure injection, D-13)
  */
 import "./env.js";
 import { createServer } from "node:http";
@@ -66,6 +67,8 @@ const server = createServer(async (req, res) => {
           chainId: env.chain.id,
           explorerBase: env.chain.id === 5042002 ? "https://testnet.arcscan.app" : null,
           simulating,
+          /** agent name -> stalled flag, straight from the live personas (D-13). */
+          stalls: Object.fromEntries(env.personas.map((p) => [p.name, p.stalled])),
         }),
       );
       return;
@@ -93,6 +96,22 @@ const server = createServer(async (req, res) => {
       }
       res.writeHead(202, { "content-type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
+      return;
+    }
+    if (req.method === "POST" && req.url?.startsWith("/stall")) {
+      // Failure injection (D-13): stalling silences the persona's consent
+      // provider — distinguishable from refusal-for-cause. Per-request
+      // variation travels in the URL (server convention: no body parsing).
+      const agent = new URL(req.url, "http://x").searchParams.get("agent") ?? "";
+      const persona = env.personas.find((p) => p.name.toLowerCase() === agent.toLowerCase());
+      if (!persona) {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: `unknown agent: ${agent}` }));
+        return;
+      }
+      persona.stalled = !persona.stalled;
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ agent: persona.name, stalled: persona.stalled }));
       return;
     }
     if (req.method === "POST" && req.url === "/round") {
