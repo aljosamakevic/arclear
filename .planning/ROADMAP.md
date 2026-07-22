@@ -38,7 +38,14 @@ Arclear v2 evolves the shipped v1 netting primitive into a two-product clearing 
   3. An IOU excluded in round n settles cleanly in round n+1, and the same IOU can never settle twice
   4. Griefing analysis is documented: repeated refusal costs only repeated rebuild latency (worst case two signature-collection passes), never a safety cost
   5. `ClearingHubV2.sol` ships with the execution path mostly unchanged — the change lives in coordinator/SDK protocol and round-rebuild logic in `round.ts`
-**Plans**: TBD
+**Plans**: 5 plans
+
+Plans:
+- [ ] 01-01-PLAN.md — Pure rebuild core in `src/round.ts` (rebuildProposal + excluded-aware verifyProposal) with fast-check invariants (wave 1)
+- [ ] 01-02-PLAN.md — ClearingHubV2.sol near-verbatim copy, digest-parity test vs existing fixture, deploy artifacts (wave 1)
+- [ ] 01-03-PLAN.md — Coordinator two-pass state machine: consent providers, timeout snapshot, miss counters, abort semantics + invariant properties (wave 2)
+- [ ] 01-04-PLAN.md — Demo wiring: V2 bytecode on anvil, stall toggle, dashboard exclusion display, e2e liveness scenario (wave 3)
+- [ ] 01-05-PLAN.md — PROTOCOL.md griefing analysis, THREAT-MODEL reconciliation, Arc testnet V2 deploys + human verify (wave 4)
 
 ### Phase 2: Merkle Manifests & IOU Redemption (brief Phase 1)
 **Goal**: Claims become provable and recoverable on-chain — manifest roots support inclusion and non-inclusion proofs, and a creditor can redeem an unconsumed IOU directly against an unresponsive debtor's collateral
@@ -125,7 +132,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8. Ex
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Threshold Consent | 0/TBD | Not started | - |
+| 1. Threshold Consent | 0/5 | Planned | - |
 | 2. Merkle Manifests & IOU Redemption | 0/TBD | Not started | - |
 | 3. Calibration Checkpoint | 0/TBD | Not started | - |
 | 4. Novation — ArclearCCP.sol | 0/TBD | Not started | - |
