@@ -102,8 +102,18 @@ npm run e2e:testnet        # or: npm run demo (dashboard against testnet)
 
 | token | hub | status |
 | ----- | --- | ------ |
-| USDC `0x3600…0000` | _deploying — see PR/commits_ | pending |
-| EURC `0x89B5…D72a` | _deploying — see PR/commits_ | pending |
+| USDC `0x3600…0000` | [`0xd5A9ef69b47b0a3C8d326fDABd57aCaFA7D3d6e2`](https://testnet.arcscan.app/address/0xd5A9ef69b47b0a3C8d326fDABd57aCaFA7D3d6e2) | source verified ✓ |
+| EURC `0x89B5…D72a` | [`0x867AD43f216B03c2a79eE02eC56F4bbEf90502c0`](https://testnet.arcscan.app/address/0x867AD43f216B03c2a79eE02eC56F4bbEf90502c0) | source verified ✓ |
+
+Real settlement on the USDC hub — 105 IOUs, $5.52 gross, $0.43 settled,
+92.3% compression, one transaction:
+[`0x64f3c5…a2c69`](https://testnet.arcscan.app/tx/0x64f3c58b0af6efcc622248550a7ca0dd963c35251c3f79b2fd237da89cfa2c69)
+
+> Gas-token gotcha (documented so you don't rediscover it): USDC is Arc's
+> native gas token *and* the ERC-20 at `0x3600…0000` — one balance, two
+> views. Always set an explicit `gas` limit on writes; letting estimation
+> probe with block-sized limits reserves your whole balance for gas and makes
+> simulated token transfers revert with "transfer amount exceeds balance".
 
 ## Measured compression (when is netting worth it?)
 

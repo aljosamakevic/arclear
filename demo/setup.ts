@@ -46,7 +46,13 @@ async function depositAll(env: Omit<DemoEnv, "explorerTx" | "anvil">, collateral
       chain: env.chain,
       transport: http(env.chain.rpcUrls.default.http[0]),
     });
-    const fee = env.chain.id === arcTestnet.id ? { maxFeePerGas: MIN_MAX_FEE_PER_GAS } : {};
+    // Explicit gas limits matter on Arc: USDC is both the gas token and the
+    // ERC-20, so letting estimation probe with huge limits reserves the whole
+    // balance for gas and makes the simulated token transfer fail.
+    const fee =
+      env.chain.id === arcTestnet.id
+        ? { maxFeePerGas: MIN_MAX_FEE_PER_GAS, gas: 200_000n }
+        : {};
     const approveHash = await wallet.writeContract({
       address: env.token,
       abi: erc20Abi,
@@ -164,6 +170,7 @@ export async function setupTestnet(): Promise<DemoEnv> {
         account: deployer,
         chain,
         maxFeePerGas: MIN_MAX_FEE_PER_GAS,
+        gas: 80_000n,
       });
       await pub.waitForTransactionReceipt({ hash: h });
     }

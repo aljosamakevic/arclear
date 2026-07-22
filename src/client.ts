@@ -76,6 +76,7 @@ export class HubClient {
       chain: wallet.chain,
       account: wallet.account!,
       maxFeePerGas: MIN_MAX_FEE_PER_GAS,
+      gas: 200_000n,
     });
   }
 
@@ -88,6 +89,7 @@ export class HubClient {
       chain: wallet.chain,
       account: wallet.account!,
       maxFeePerGas: MIN_MAX_FEE_PER_GAS,
+      gas: 200_000n,
     });
   }
 
@@ -111,6 +113,7 @@ export class HubClient {
       chain: wallet.chain,
       account: wallet.account!,
       maxFeePerGas: MIN_MAX_FEE_PER_GAS,
+      gas: 1_500_000n,
     });
   }
 }
