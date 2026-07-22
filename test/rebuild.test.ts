@@ -1,8 +1,18 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { keccak256, toHex, type Address, type Hex } from "viem";
-import { rebuildProposal } from "../src/round.js";
-import type { SignedIou } from "../src/types.js";
+import { privateKeyToAccount } from "viem/accounts";
+import { signIou } from "../src/iou.js";
+import { net } from "../src/netting.js";
+import {
+  buildProposal,
+  rebuildProposal,
+  roundDigest,
+  signConsent,
+  verifyConsent,
+  verifyProposal,
+} from "../src/round.js";
+import type { Iou, SignedIou } from "../src/types.js";
 
 const HUB = "0x1111111111111111111111111111111111111111" as Address;
 const NOW = 1_800_000_000n;
@@ -132,5 +142,125 @@ describe("rebuildProposal properties", () => {
         }
       }),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 2: excluded-aware verifyProposal — honest rebuilds verify, every
+// modeled coordinator lie is refused with a diagnostic reason.
+// ---------------------------------------------------------------------------
+
+const alice = privateKeyToAccount(("0x" + "11".repeat(32)) as Hex);
+const bob = privateKeyToAccount(("0x" + "22".repeat(32)) as Hex);
+const carol = privateKeyToAccount(("0x" + "33".repeat(32)) as Hex);
+
+function iou(debtor: Address, creditor: Address, amount: bigint, nonce = 1n): Iou {
+  return {
+    debtor,
+    creditor,
+    amount,
+    nonce,
+    expiry: NOW + 86_400n,
+    ref: ("0x" + "00".repeat(32)) as Hex,
+  };
+}
+
+/** Four real signed IOUs among alice/bob/carol; excluding carol changes every delta. */
+async function threeMemberEconomy(): Promise<SignedIou[]> {
+  return [
+    await signIou(HUB, iou(alice.address, bob.address, 100n), alice),
+    await signIou(HUB, iou(bob.address, alice.address, 30n), bob),
+    await signIou(HUB, iou(carol.address, alice.address, 50n), carol),
+    await signIou(HUB, iou(bob.address, carol.address, 20n), bob),
+  ];
+}
+
+describe("verifyProposal with excluded set", () => {
+  it("honest rebuild verifies for every remaining participant", async () => {
+    const ious = await threeMemberEconomy();
+    const excluded = [carol.address];
+    const { proposal } = rebuildProposal(HUB, 0n, ious, excluded, { now: NOW });
+    for (const account of [alice, bob]) {
+      const check = verifyProposal(HUB, proposal, ious, account.address, {
+        now: NOW,
+        excluded,
+      });
+      expect(check.ok).toBe(true);
+    }
+  });
+
+  it("refuses when self is in the excluded set", async () => {
+    const ious = await threeMemberEconomy();
+    const excluded = [carol.address];
+    const { proposal } = rebuildProposal(HUB, 0n, ious, excluded, { now: NOW });
+    const check = verifyProposal(HUB, proposal, ious, carol.address, {
+      now: NOW,
+      excluded,
+    });
+    expect(check.ok).toBe(false);
+    expect(check.reason).toMatch(/excluded/);
+  });
+
+  it("refuses when an excluded address appears in participants", async () => {
+    const ious = await threeMemberEconomy();
+    const excluded = [carol.address];
+    const { proposal } = rebuildProposal(HUB, 0n, ious, excluded, { now: NOW });
+    // Lying coordinator: sneak the excluded address back into participants with
+    // a zero delta and recompute manifestHash + digest so only this check fires.
+    const participants = [...proposal.participants, carol.address];
+    const deltas = [...proposal.deltas, 0n];
+    const p = {
+      roundNonce: proposal.roundNonce,
+      participants,
+      deltas,
+      manifestHash: proposal.manifestHash,
+    };
+    const tampered = {
+      ...p,
+      digest: roundDigest(HUB, p),
+      consumedIds: proposal.consumedIds,
+    };
+    const check = verifyProposal(HUB, tampered, ious, alice.address, {
+      now: NOW,
+      excluded,
+    });
+    expect(check.ok).toBe(false);
+    expect(check.reason).toMatch(/excluded/);
+  });
+
+  it("withheld exclusion produces a delta mismatch refusal", async () => {
+    const ious = await threeMemberEconomy();
+    const { proposal } = rebuildProposal(HUB, 0n, ious, [carol.address], { now: NOW });
+    // Participant is NOT told who was dropped: local net() over the unfiltered
+    // view disagrees with the rebuilt deltas — zero-trust refusal.
+    const check = verifyProposal(HUB, proposal, ious, alice.address, { now: NOW });
+    expect(check.ok).toBe(false);
+    expect(check.reason).toMatch(/delta mismatch/);
+  });
+
+  it("consent signatures bind to the rebuilt digest, never replay from pass 1", async () => {
+    const ious = await threeMemberEconomy();
+    const pass1 = buildProposal(HUB, 0n, net(ious, { now: NOW }));
+    const { proposal: rebuilt } = rebuildProposal(HUB, 0n, ious, [carol.address], {
+      now: NOW,
+    });
+    expect(rebuilt.digest).not.toBe(pass1.digest);
+
+    const consent = await signConsent(HUB, rebuilt, alice);
+    expect(await verifyConsent(HUB, rebuilt, alice.address, consent)).toBe(true);
+    expect(await verifyConsent(HUB, rebuilt, bob.address, consent)).toBe(false);
+
+    // A pass-1 consent can never be replayed against the pass-2 digest.
+    const consent1 = await signConsent(HUB, pass1, alice);
+    expect(await verifyConsent(HUB, rebuilt, alice.address, consent1)).toBe(false);
+  });
+
+  it("omitted excluded opt keeps pass-1 semantics for existing callers", async () => {
+    const ious = await threeMemberEconomy();
+    const pass1 = buildProposal(HUB, 0n, net(ious, { now: NOW }));
+    for (const account of [alice, bob, carol]) {
+      const check = verifyProposal(HUB, pass1, ious, account.address, { now: NOW });
+      expect(check.ok).toBe(true);
+    }
   });
 });
