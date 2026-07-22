@@ -23,7 +23,12 @@ findings:
   warning: 7
   info: 7
   total: 15
-status: issues_found
+fixes:
+  fixed_at: 2026-07-23T01:40:00Z
+  fixed: 11
+  deferred: 4
+  gate: tsc clean · vitest 42/42 · forge 27/27 · e2e:anvil PASS
+status: fixes_applied
 ---
 
 # Phase 1: Code Review Report
@@ -31,7 +36,35 @@ status: issues_found
 **Reviewed:** 2026-07-22T23:24:09Z
 **Depth:** standard
 **Files Reviewed:** 14
-**Status:** issues_found
+**Status:** fixes_applied (was issues_found)
+
+## Fix Outcomes (2026-07-23)
+
+All Critical and Warning findings fixed; Info findings IN-01 and IN-05 fixed,
+IN-02/IN-03/IN-04/IN-06/IN-07 deferred with per-finding notes below. One
+atomic `fix(01)` commit per finding. Full gate re-run after all fixes:
+`npx tsc --noEmit` clean, `npm test` 42/42, `forge test` 27/27 (incl. digest
+parity — ClearingHubV2 change was comment-only per D-09), `npm run e2e:anvil`
+PASS (baseline + liveness scenario).
+
+| Finding | Outcome | Commit |
+|---------|---------|--------|
+| CR-01 | Fixed + regression test | `fix(01): CR-01 verify every collected consent signature before submit` |
+| WR-01 | Fixed | `fix(01): WR-01 reconcile unconfirmed submissions against chain state` |
+| WR-02 | Fixed | `fix(01): WR-02 detect nonce races from chain state, not error strings` |
+| WR-03 | Fixed | `fix(01): WR-03 snapshot IOUs once per attempt and guard /round with 409` |
+| WR-04 | Fixed (comment-only) | `fix(01): WR-04 correct ClearingHubV2 NatSpec manifestHash claim` |
+| WR-05 | Fixed + test | `fix(01): WR-05 treat synchronously-throwing providers as refusals` |
+| WR-06 | Fixed + tests | `fix(01): WR-06 give participants tools against double-consent induction` |
+| WR-07 | Fixed | `fix(01): WR-07 widen wall-clock margins in collectConsents timing tests` |
+| WR-08 | Fixed | `fix(01): WR-08 kill spawned anvil on the baseline-failure exit path` |
+| IN-01 | Fixed | `fix(01): IN-01 delete dead strangers computation in verifyProposal` |
+| IN-02 | Deferred | canonical-order check on consumedIds — deltas unaffected; low risk |
+| IN-03 | Deferred | V2 behavioral suite — sources verified identical; parity + e2e cover today |
+| IN-04 | Deferred | dashboard innerHTML escaping — local demo only; note for hardening pass |
+| IN-05 | Fixed | `fix(01): IN-05 simplify net-delta cell — drop no-op slice and dead ternary` |
+| IN-06 | Deferred | test-file rename churn only |
+| IN-07 | Deferred | anvil readiness poll — orphan-leak source (WR-08) fixed; poll noted |
 
 ## Summary
 
@@ -109,6 +142,12 @@ if (outcome.kind === "consent") {
 must land in the excluded batch, and `submit` must never be called with a
 signature set the coordinator has not locally verified.) Add a
 `mkProviders` behavior (`badSignature`) to `test/rebuild.test.ts` covering it.
+**Outcome:** Fixed — `screenConsents` (`demo/coordinator.ts`) verifies every
+collected signature before it counts, on BOTH passes; an invalid signature is
+demoted to a refusal-for-cause (D-07: excluded, miss counter untouched), so
+`submit` only ever sees locally-verified signature sets. Regression test
+(`badSignature` provider) proves the round settles in 2 passes without the
+attacker.
 
 ## Warnings
 
@@ -132,6 +171,11 @@ compare `roundHash` to the submitted proposal digest, and if it matches, fold
 the submitted proposal's `consumedIds` into `settledIds` before re-netting.
 At minimum, persist the pending proposal and refuse to run a new round while a
 submitted-but-unconfirmed one exists.
+**Outcome:** Fixed — coordinator records `pendingSubmission` before
+broadcasting and reconciles it at the start of every round: if the nonce was
+consumed, the `RoundExecuted` log is matched by `roundHash` (== signed digest)
+and matching `consumedIds` are folded into `settledIds`; while genuinely in
+flight, new rounds are refused (structured abort).
 
 ### WR-02: WrongRoundNonce graceful-abort branch is unreachable — nonce races surface as failures
 
@@ -151,6 +195,9 @@ comment) as a fault.
 args inside `submit`, which decodes `WrongRoundNonce` properly) or, on receipt
 revert, re-read `hubClient.roundNonce()` and branch on
 `onChainNonce !== proposal.roundNonce` instead of string-matching the message.
+**Outcome:** Fixed — on a reverted receipt, `submit` re-reads the hub's
+`roundNonce` and surfaces the `WrongRoundNonce` marker when it advanced past
+the submitted nonce; the graceful-abort branch is now driven by chain state.
 
 ### WR-03: Coordinator state races: no round mutex, and consent providers read the live IOU list mid-round
 
@@ -176,6 +223,9 @@ revert, re-read `hubClient.roundNonce()` and branch on
 providers over that array instead of `this.openIous`. (2) Add a `roundInFlight`
 boolean in `server.ts` (or in `Coordinator.runRound`) that rejects/queues a
 second concurrent round with a 409.
+**Outcome:** Fixed — `runRound` snapshots `openIous` once and providers close
+over the snapshot; `/round` rejects a concurrent request with 409 via a
+`roundInFlight` flag.
 
 ### WR-04: ClearingHubV2 NatSpec falsely claims manifestHash is a merkle root
 
@@ -192,6 +242,8 @@ where name/NatSpec *accurately* describe it.
 **Fix:** Reword lines 25-27 to match reality, e.g. "`manifestHash` carries the
 keccak256 of the sorted consumed-IOU-id list (same bytes32 slot; a later phase
 swaps in a sorted-leaf merkle root without touching the contract)."
+**Outcome:** Fixed — comment-only NatSpec reword; all 27 forge tests
+(incl. digest parity) pass, execution path untouched (D-09).
 
 ### WR-05: A synchronously-throwing consent provider crashes the whole collection
 
@@ -213,6 +265,8 @@ Promise.resolve().then(() => provider(proposal, excluded)).then(
   (e) => { /* existing rejection handler */ },
 );
 ```
+**Outcome:** Fixed — exactly this pattern applied in `collectConsents`; test
+added (sync-throwing provider becomes a reasoned refusal).
 
 ### WR-06: verifyProposal never checks roundNonce — a participant can be induced to consent twice over the same paper
 
@@ -236,6 +290,9 @@ unconfirmed prior consent, and should check `proposal.roundNonce` against the
 hub's live `roundNonce`). Better: accept an optional
 `opts.expectedRoundNonce?: bigint` and/or `opts.pendingConsumedIds?:
 ReadonlySet<Hex>` and refuse on mismatch/overlap with a diagnostic reason.
+**Outcome:** Fixed — both optional opts added with diagnostic refusals, hazard
+documented on `verifyProposal`, demo providers pin the chain-read nonce, and
+unit tests cover mismatch/overlap/pass cases.
 
 ### WR-07: Wall-clock timing assertions in rebuild.test.ts are flake-prone
 
@@ -250,6 +307,8 @@ by design, but these direct assertions do not.
 assert the ordering property instead of elapsed time — `timedOut` empty and
 `consents.size === 3` already prove early completion; if elapsed time must be
 checked, assert it is less than the window itself with generous slack.
+**Outcome:** Fixed — 200ms window with `< 150` assertion; late-consent test
+separates deadline and late arrival by 100ms.
 
 ### WR-08: e2e baseline-failure path leaks the spawned anvil process
 
@@ -263,6 +322,7 @@ then silently attaches its personas/deployments to the stale chain state
 confusing cascading failures.
 **Fix:** Add `env.anvil?.kill();` before the `process.exit(1)` at line 101, or
 consolidate into a single `fail(msg)` helper used by all four exit paths.
+**Outcome:** Fixed — `env.anvil?.kill()` added to the baseline-failure path.
 
 ## Info
 
@@ -276,6 +336,7 @@ that suggests an unfinished check.
 **Fix:** Delete the computation and keep only the explanatory comment, or
 finish the check (e.g. flag strangers whose ids collide with locally-known
 IOUs).
+**Outcome:** Fixed — dead computation deleted, explanatory comment kept.
 
 ### IN-02: verifyProposal does not enforce canonical (sorted, deduped) consumedIds
 
@@ -288,6 +349,9 @@ preimage (PROTOCOL.md rule 7), breaking third-party after-the-fact
 reproducibility of the manifest.
 **Fix:** Check sortedness/uniqueness before hashing and refuse with reason
 "consumedIds not in canonical order".
+**Outcome:** Deferred — deltas are unaffected and the coordinator always emits
+canonical manifests; canonical-order refusal queued for the next SDK-touching
+phase.
 
 ### IN-03: No behavioral test suite runs against ClearingHubV2
 
@@ -301,6 +365,9 @@ invisible to `forge test`.
 **Fix:** Parameterize `RoundBuilder`/the existing suites over the hub
 implementation, or add a thin `ClearingHubV2.t.sol` that inherits the v1 test
 contract with the V2 deployment.
+**Outcome:** Deferred — sources remain verified identical (digest parity + e2e
+bytecode-tail check); suite parameterization queued for the next
+contracts-touching phase.
 
 ### IN-04: Dashboard renders server/participant-derived strings via innerHTML
 
@@ -312,6 +379,8 @@ making this a stored-XSS foothold on the coordinator's dashboard. Low risk for
 the local demo, but the pattern will be copied forward.
 **Fix:** Use `textContent` for `phase`/error strings, or HTML-escape all
 interpolated values.
+**Outcome:** Deferred — local single-user demo; escape-on-render when the
+dashboard is hardened for multi-party use.
 
 ### IN-05: Convoluted no-op expression in the net-delta cell
 
@@ -321,6 +390,7 @@ argument is `0` in both branches (no-op), and the surrounding ternary
 (`usd(...) === "$0.00" && net === 0n ? "$0.00" : …`) collapses to the else
 branch's value in every case. Dead code obscuring a simple format call.
 **Fix:** `` `${net > 0n ? "+" : net < 0n ? "−" : ""}${usd(net < 0n ? -net : net)}` ``.
+**Outcome:** Fixed — exactly this expression (via the existing `sign` var).
 
 ### IN-06: Parity test file name does not match its contract name
 
@@ -330,6 +400,7 @@ branch's value in every case. Dead code obscuring a simple format call.
 convention (compare `DigestParity.t.sol` → `DigestParityTest`).
 **Fix:** Rename the file to `DigestParityV2.t.sol` (or the contract to
 `ClearingHubV2ParityTest`).
+**Outcome:** Deferred — pure rename churn; fold into IN-03's V2 test work.
 
 ### IN-07: Anvil startup race and stale-instance attach in setup
 
@@ -341,6 +412,8 @@ instance with stale state, since neither the spawn result nor the chain state
 is checked.
 **Fix:** Poll `eth_chainId`/`getBlockNumber` until ready with a bounded retry,
 and fail fast if `anvil.exitCode !== null` after spawn (port collision).
+**Outcome:** Deferred — the orphan source (WR-08 leak) is fixed; readiness
+polling/fail-fast noted for a demo-infra pass.
 
 ---
 
