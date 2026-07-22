@@ -13,7 +13,7 @@ import {
 } from "viem";
 import { arcTestnet, MIN_MAX_FEE_PER_GAS, USDC } from "../src/domain.js";
 import { HubClient } from "../src/client.js";
-import { clearingHubAbi, clearingHubBytecode } from "../src/abi/ClearingHub.js";
+import { clearingHubV2Abi, clearingHubV2Bytecode } from "../src/abi/ClearingHubV2.js";
 import { mockTokenAbi, mockTokenBytecode } from "./mockToken.js";
 import { agents, relayer, ANVIL_MNEMONIC, type AgentPersona } from "./agents.js";
 
@@ -65,7 +65,7 @@ async function depositAll(env: Omit<DemoEnv, "explorerTx" | "anvil">, collateral
     await env.pub.waitForTransactionReceipt({ hash: approveHash });
     const depositHash = await wallet.writeContract({
       address: env.hub,
-      abi: clearingHubAbi,
+      abi: clearingHubV2Abi,
       functionName: "deposit",
       args: [collateralAmount],
       chain: env.chain,
@@ -95,8 +95,8 @@ export async function setupAnvil(): Promise<DemoEnv> {
   });
   const token = (await pub.waitForTransactionReceipt({ hash: tokenTx })).contractAddress!;
   const hubTx = await wallet.deployContract({
-    abi: clearingHubAbi,
-    bytecode: clearingHubBytecode,
+    abi: clearingHubV2Abi,
+    bytecode: clearingHubV2Bytecode,
     args: [token],
     account: deployer,
     chain,
@@ -129,16 +129,16 @@ export async function setupAnvil(): Promise<DemoEnv> {
 }
 
 /**
- * Testnet mode: attach to a deployed hub (HUB_USDC env), derive agents from
- * AGENT_MNEMONIC, top up their USDC from the deployer if needed. On Arc, USDC
- * is the native gas token with an ERC-20 facade, so one transfer funds both
- * gas and collateral.
+ * Testnet mode: attach to a deployed V2 hub (HUB_V2_USDC env), derive agents
+ * from AGENT_MNEMONIC, top up their USDC from the deployer if needed. On Arc,
+ * USDC is the native gas token with an ERC-20 facade, so one transfer funds
+ * both gas and collateral. The v1 HUB_USDC key stays reserved for Arclear Net.
  */
 export async function setupTestnet(): Promise<DemoEnv> {
-  const hub = process.env.HUB_USDC as Address | undefined;
+  const hub = process.env.HUB_V2_USDC as Address | undefined;
   const mnemonic = process.env.AGENT_MNEMONIC;
   const deployerPk = process.env.DEPLOYER_PK;
-  if (!hub) throw new Error("HUB_USDC not set — deploy first (see README)");
+  if (!hub) throw new Error("HUB_V2_USDC not set — deploy ClearingHubV2 first (see README)");
   if (!mnemonic) throw new Error("AGENT_MNEMONIC not set");
   if (!deployerPk) throw new Error("DEPLOYER_PK not set");
 
