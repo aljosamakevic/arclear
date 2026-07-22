@@ -57,7 +57,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 01-04-PLAN.md — Demo wiring: V2 bytecode on anvil, stall toggle, dashboard exclusion display, e2e liveness scenario (wave 3)
+- [x] 01-04-PLAN.md — Demo wiring: V2 bytecode on anvil, stall toggle, dashboard exclusion display, e2e liveness scenario (wave 3)
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
@@ -169,7 +169,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8. Ex
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Threshold Consent | 3/5 | In Progress|  |
+| 1. Threshold Consent | 4/5 | In Progress|  |
 | 2. Merkle Manifests & IOU Redemption | 0/TBD | Not started | - |
 | 3. Calibration Checkpoint | 0/TBD | Not started | - |
 | 4. Novation — ArclearCCP.sol | 0/TBD | Not started | - |
