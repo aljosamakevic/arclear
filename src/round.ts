@@ -172,12 +172,9 @@ export function verifyProposal(
     };
   }
 
-  // Every consumed IOU touching us must be one we actually saw.
-  const myIds = new Set(myIous.map((s) => s.id.toLowerCase()));
-  const strangers = proposal.consumedIds.filter((id) => !myIds.has(id.toLowerCase()));
-  // Strangers are fine if they don't involve us — we can't tell from ids alone,
-  // but our delta already pins the sum of everything that involves us.
-  void strangers;
+  // No stranger-id check (IN-01): consumed ids we haven't seen locally are
+  // fine as long as they don't involve us — we can't tell from ids alone, but
+  // our delta already pins the sum of everything that involves us.
 
   if (manifestHash(proposal.consumedIds) !== proposal.manifestHash) {
     return { ok: false, reason: "manifestHash does not match consumedIds" };
