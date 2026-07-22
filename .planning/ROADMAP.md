@@ -53,7 +53,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 01-03-PLAN.md — Coordinator two-pass state machine: consent providers, timeout snapshot, miss counters, abort semantics + invariant properties (wave 2)
+- [x] 01-03-PLAN.md — Coordinator two-pass state machine: consent providers, timeout snapshot, miss counters, abort semantics + invariant properties (wave 2)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
@@ -169,7 +169,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8. Ex
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Threshold Consent | 2/5 | In Progress|  |
+| 1. Threshold Consent | 3/5 | In Progress|  |
 | 2. Merkle Manifests & IOU Redemption | 0/TBD | Not started | - |
 | 3. Calibration Checkpoint | 0/TBD | Not started | - |
 | 4. Novation — ArclearCCP.sol | 0/TBD | Not started | - |
