@@ -374,18 +374,18 @@ New `.env.example` keys recommended: `HUB_V2_USDC`, `HUB_V2_EURC` (v1 `HUB_USDC`
 | A2 | `gas: 1_500_000n` in `src/client.ts:116` remains sufficient for demo-scale V2 rounds (execution path unchanged, same round sizes) | Pitfall 7 | Low at demo scale; STATE.md already flags this as a growing-round-size concern — planner may add a headroom note, not a fix |
 | A3 | Deterministic snapshot-then-ignore of late consents is sufficient for D-02 determinism under Node's single-threaded event loop | Pattern 2 / Pitfall 3 | Low — property tests with injected providers will catch ordering bugs |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Where exactly does the excluded-list metadata live in the pass-2 message?**
    - What we know: D-08 fixes deadline (and by extension exclusion info) as out-of-band; `verifyProposal` needs it to recompute.
    - What's unclear: whether to widen `RoundProposal` (TS-only, digest unchanged) with optional `excluded?: Address[]` or pass it as a separate argument.
-   - Recommendation: separate argument / opts field — keep `RoundProposal` exactly mirroring the signed struct + digest + consumedIds to avoid any confusion about what is signed. (Claude's discretion per CONTEXT.)
+   - RESOLVED: separate argument / opts field — keep `RoundProposal` exactly mirroring the signed struct + digest + consumedIds to avoid any confusion about what is signed. (Claude's discretion per CONTEXT.)
 2. **`RoundBuilder.sol` reuse for V2 contract tests**
    - What we know: `_digest` hardcodes domain strings and `address(hub)`; the harness type-binds `ClearingHub`.
-   - Recommendation: parameterize by `address` (or add a tiny V2 harness) rather than duplicating 125 lines; planner picks based on how many V2 unit tests are wanted (parity test alone needs neither).
+   - RESOLVED: parameterize by `address` (or add a tiny V2 harness) rather than duplicating 125 lines; planner picks based on how many V2 unit tests are wanted (parity test alone needs neither).
 3. **Whether `collectConsents` lives in `src/` or `demo/`**
    - What we know: it's impure (timers) but protocol-shaped; SDK is currently pure-plus-client.
-   - Recommendation: keep it in `demo/coordinator.ts` for this phase (it's coordinator policy); promote to `src/` only if Phase 2/calibration needs it — avoids expanding the public SDK surface with timer semantics.
+   - RESOLVED: keep it in `demo/coordinator.ts` for this phase (it's coordinator policy); promote to `src/` only if Phase 2/calibration needs it — avoids expanding the public SDK surface with timer semantics.
 
 ## Environment Availability
 
