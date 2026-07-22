@@ -24,7 +24,7 @@ A CCP is defined by operating *through* a member failure: the system must keep s
 
 <!-- v2 scope. Phases below map 1:1 onto the roadmap (Phase 0–6 + calibration checkpoint). -->
 
-- [ ] **Phase 0 — Threshold consent (liveness):** exclude-and-recompute rounds — threshold over the candidate set, unanimity over the final executed set; `ClearingHubV2.sol` + round-rebuild logic in `round.ts`
+- [x] **Phase 0 — Threshold consent (liveness):** exclude-and-recompute rounds — threshold over the candidate set, unanimity over the final executed set; `ClearingHubV2.sol` + round-rebuild logic in `round.ts`
 - [ ] **Phase 1 — Merkle manifests + on-chain IOU redemption:** sorted-leaf merkle manifest roots, inclusion/non-inclusion proofs, `redeemIOU` recovery path against unresponsive debtors with nullifier protection
 - [ ] **Calibration checkpoint (between Phases 1 and 2):** extend `demo/sweep.ts` to simulate threshold-consent rounds with unresponsive members and margin scenarios; answers gate CCP scope
 - [ ] **Phase 2 — Novation (`ArclearCCP.sol`):** members face the hub; matched-book invariant `Σ openPosition == 0 && hubPosition == 0` under any novation/settlement sequence
@@ -93,4 +93,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-07-22 after initialization*
+*Last updated: 2026-07-22 after Phase 1 completion*
