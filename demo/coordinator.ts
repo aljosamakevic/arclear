@@ -91,7 +91,13 @@ export async function collectConsents(
     for (const participant of proposal.participants) {
       const key = participant.toLowerCase();
       const provider = providers.get(key)!;
-      provider(proposal, excluded).then(
+      // WR-05: route the call through the microtask queue so a provider that
+      // throws SYNCHRONOUSLY becomes a rejection handled by the refusal path
+      // below, instead of throwing out of the Promise executor and rejecting
+      // the whole collection.
+      Promise.resolve()
+        .then(() => provider(proposal, excluded))
+        .then(
         (outcome) => {
           if (settled) return; // late — snapshot already taken (D-02)
           pending.delete(key);

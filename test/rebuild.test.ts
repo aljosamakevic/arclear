@@ -340,6 +340,23 @@ describe("collectConsents window (CONS-01)", () => {
     expect(out.timedOut).toEqual([]);
   });
 
+  it("WR-05: a synchronously-throwing provider is a refusal, never a collection crash", async () => {
+    const providers = new Map<string, ConsentProvider>([
+      [members[0].toLowerCase(), consentAfter(2, "0x01")],
+      [
+        members[1].toLowerCase(),
+        () => {
+          throw new Error("sync boom");
+        },
+      ],
+      [members[2].toLowerCase(), consentAfter(2, "0x03")],
+    ]);
+    const out = await collectConsents(fakeProposal(members), [], providers, 50);
+    expect(out.refused).toEqual([{ address: members[1], reason: "sync boom" }]);
+    expect(out.consents.size).toBe(2);
+    expect(out.timedOut).toEqual([]);
+  });
+
   it("late consent after the snapshot mutates nothing (D-02)", async () => {
     const windowMs = 25;
     const providers = new Map<string, ConsentProvider>([
