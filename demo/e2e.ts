@@ -98,6 +98,9 @@ console.log("[e2e] running netting round …");
 const baseline = await coordinator.runRound(now());
 if (baseline.outcome !== "settled") {
   console.error(`[e2e] FAIL — baseline round did not settle (${baseline.outcome})`);
+  // WR-08: kill the spawned anvil on EVERY exit path — an orphan bound to
+  // 8545 makes the next run silently attach to stale chain state.
+  env.anvil?.kill();
   process.exit(1);
 }
 check(baseline.round.passCount === 1, "baseline round settled in a single pass");
