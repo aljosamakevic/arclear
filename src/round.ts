@@ -66,6 +66,19 @@ export function buildProposal(
 }
 
 /**
+ * Drop every IOU touching an excluded member. Shared by rebuildProposal and
+ * verifyProposal so the coordinator's rebuild and the participant's local
+ * recomputation can never diverge.
+ */
+function filterExcluded(ious: SignedIou[], excluded: Address[]): SignedIou[] {
+  if (excluded.length === 0) return ious;
+  const ex = new Set(excluded.map((a) => a.toLowerCase()));
+  return ious.filter(
+    (s) => !ex.has(s.iou.debtor.toLowerCase()) && !ex.has(s.iou.creditor.toLowerCase()),
+  );
+}
+
+/**
  * Pure exclude-and-recompute: drop every IOU touching an excluded member,
  * re-net with the unchanged engine, and re-propose over the SAME roundNonce
  * (nothing executed in pass 1). The excluded list is out-of-band coordinator
@@ -78,11 +91,7 @@ export function rebuildProposal(
   excluded: Address[],
   opts: { now: bigint; safetyWindowSeconds?: bigint; settledIds?: ReadonlySet<Hex>; chainId?: number },
 ): { proposal: RoundProposal; result: NetResult } {
-  const ex = new Set(excluded.map((a) => a.toLowerCase()));
-  const kept = openIous.filter(
-    (s) => !ex.has(s.iou.debtor.toLowerCase()) && !ex.has(s.iou.creditor.toLowerCase()),
-  );
-  const result = net(kept, opts);
+  const result = net(filterExcluded(openIous, excluded), opts);
   return { proposal: buildProposal(hub, roundNonce, result, opts.chainId), result };
 }
 
@@ -90,19 +99,33 @@ export function rebuildProposal(
  * Participant-side check before consenting: recompute the netting from the
  * IOUs *we* have seen and compare byte-for-byte with the proposal. Never trust
  * the coordinator's arithmetic — that distrust is what makes unanimity safe.
+ * `opts.excluded` is out-of-band rebuild metadata folded into the local
+ * recomputation: a coordinator lie about the excluded set produces a delta
+ * mismatch or an explicit exclusion refusal, never a silent accept.
  */
 export function verifyProposal(
   hub: Address,
   proposal: RoundProposal,
   myIous: SignedIou[],
   self: Address,
-  opts: { now: bigint; safetyWindowSeconds?: bigint; settledIds?: ReadonlySet<Hex>; chainId?: number },
+  opts: { now: bigint; safetyWindowSeconds?: bigint; settledIds?: ReadonlySet<Hex>; excluded?: Address[]; chainId?: number },
 ): { ok: boolean; reason?: string } {
   const selfLc = self.toLowerCase();
+  const excluded = opts.excluded ?? [];
+  const ex = new Set(excluded.map((a) => a.toLowerCase()));
+  if (ex.has(selfLc)) {
+    return { ok: false, reason: `self ${self} is excluded from this round` };
+  }
+  for (const p of proposal.participants) {
+    if (ex.has(p.toLowerCase())) {
+      return { ok: false, reason: `excluded address ${p} present in participants` };
+    }
+  }
+
   const idx = proposal.participants.findIndex((a) => a.toLowerCase() === selfLc);
   if (idx === -1) return { ok: false, reason: "self not in participant set" };
 
-  const recomputed = net(myIous, opts);
+  const recomputed = net(filterExcluded(myIous, excluded), opts);
   const myIdx = recomputed.participants.findIndex((a) => a.toLowerCase() === selfLc);
   const myDelta = myIdx === -1 ? 0n : recomputed.deltas[myIdx];
   if (proposal.deltas[idx] !== myDelta) {
