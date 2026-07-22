@@ -8,7 +8,7 @@ import {
   verifyConsent,
   verifyProposal,
 } from "../src/round.js";
-import { HubClient } from "../src/client.js";
+import { clearingHubAbi, HubClient } from "../src/client.js";
 import type { NetResult, RoundProposal, SignedIou } from "../src/types.js";
 import type { AgentPersona } from "./agents.js";
 
@@ -332,6 +332,14 @@ export class Coordinator {
   missed = new Map<string, number>();
   /** Default wall-clock consent window per collection pass (D-05). */
   readonly consentWindowMs: number;
+  /** Submitted executeRound not yet folded into settledIds (WR-01/CONS-04). */
+  private pendingSubmission?: {
+    roundNonce: bigint;
+    digest: Hex;
+    consumedIds: Hex[];
+    sentAtBlock: bigint;
+    txHash?: Hex;
+  };
 
   constructor(
     readonly hub: Address,
@@ -354,11 +362,70 @@ export class Coordinator {
     return this.ious.filter((s) => !this.settledIds.has(s.id.toLowerCase() as Hex));
   }
 
+  /**
+   * WR-01 (CONS-04 "never twice"): a submitted executeRound whose receipt wait
+   * failed (RPC transport error, crash) may still have mined. Before netting
+   * again, reconcile against chain state: fold the pending proposal's
+   * consumedIds into settledIds iff its RoundExecuted log is on-chain — the
+   * logged `roundHash` IS the EIP-712 digest participants signed — and refuse
+   * to start a new round while the submission is still genuinely in flight.
+   */
+  private async reconcilePendingSubmission(): Promise<
+    { blocked: false } | { blocked: true; reason: string }
+  > {
+    const pending = this.pendingSubmission;
+    if (!pending) return { blocked: false };
+    const onChainNonce = await this.hubClient.roundNonce();
+    if (onChainNonce > pending.roundNonce) {
+      // The nonce was consumed — by our round or by a concurrent one.
+      const logs = await this.pub.getContractEvents({
+        address: this.hub,
+        abi: clearingHubAbi,
+        eventName: "RoundExecuted",
+        args: { roundNonce: pending.roundNonce },
+        fromBlock: pending.sentAtBlock,
+      });
+      const ours = logs.some(
+        (l) => (l.args.roundHash ?? "").toLowerCase() === pending.digest.toLowerCase(),
+      );
+      if (ours) {
+        for (const id of pending.consumedIds) this.settledIds.add(id.toLowerCase() as Hex);
+      }
+      this.pendingSubmission = undefined;
+      return { blocked: false };
+    }
+    if (pending.txHash) {
+      const receipt = await this.pub
+        .getTransactionReceipt({ hash: pending.txHash })
+        .catch(() => null);
+      if (receipt) {
+        // Mined but the nonce did not advance — it reverted; nothing executed.
+        this.pendingSubmission = undefined;
+        return { blocked: false };
+      }
+    }
+    return {
+      blocked: true,
+      reason:
+        "previous submission still unconfirmed — refusing to start a new round (CONS-04)",
+    };
+  }
+
   async runRound(now: bigint, windowMs?: number): Promise<RunRoundResult> {
     try {
       this.phase = "netting";
       this.phaseDetail = "computing net positions";
       this.lastError = undefined;
+
+      // WR-01: reconcile any submitted-but-unconfirmed round before re-netting,
+      // so the same paper can never be settled twice by an unknowing restart.
+      const reconciled = await this.reconcilePendingSubmission();
+      if (reconciled.blocked) {
+        this.phase = "aborted";
+        this.phaseDetail = reconciled.reason;
+        return { outcome: "aborted", reason: reconciled.reason, excluded: [], passCount: 0 };
+      }
+
       const roundNonce = await this.hubClient.roundNonce();
 
       // Provider map: a stalled persona never answers (D-13); an honest one
@@ -388,9 +455,24 @@ export class Coordinator {
       const submit = async (proposal: RoundProposal, signatures: Hex[]): Promise<Hex> => {
         this.phase = "submitting";
         this.phaseDetail = "sending executeRound";
+        // WR-01: record the in-flight submission BEFORE broadcasting, so a
+        // receipt-transport failure is reconciled on the next round instead of
+        // silently re-netting (and re-settling) the same paper.
+        const sentAtBlock = await this.pub.getBlockNumber();
+        this.pendingSubmission = {
+          roundNonce: proposal.roundNonce,
+          digest: proposal.digest,
+          consumedIds: proposal.consumedIds,
+          sentAtBlock,
+        };
         const txHash = await this.hubClient.executeRound(this.relayerWallet, proposal, signatures);
+        this.pendingSubmission.txHash = txHash;
         const receipt = await this.pub.waitForTransactionReceipt({ hash: txHash });
-        if (receipt.status !== "success") throw new Error(`tx reverted: ${txHash}`);
+        if (receipt.status !== "success") {
+          // Definitively mined-and-reverted: nothing executed, nothing pending.
+          this.pendingSubmission = undefined;
+          throw new Error(`tx reverted: ${txHash}`);
+        }
         return txHash;
       };
 
@@ -435,6 +517,7 @@ export class Coordinator {
       const { proposal, result } = attempt;
       // Consumed ids join settledIds ONLY on confirmed settlement, never on abort.
       for (const id of proposal.consumedIds) this.settledIds.add(id.toLowerCase() as Hex);
+      this.pendingSubmission = undefined; // folded — nothing left to reconcile (WR-01)
 
       const deltas: Record<string, string> = {};
       proposal.participants.forEach((p, i) => {
