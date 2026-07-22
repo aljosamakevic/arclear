@@ -12,7 +12,12 @@ import {
   verifyConsent,
   verifyProposal,
 } from "../src/round.js";
-import type { Iou, SignedIou } from "../src/types.js";
+import type { Iou, RoundProposal, SignedIou } from "../src/types.js";
+import {
+  applyMissSemantics,
+  collectConsents,
+  type ConsentProvider,
+} from "../demo/coordinator.js";
 
 const HUB = "0x1111111111111111111111111111111111111111" as Address;
 const NOW = 1_800_000_000n;
@@ -262,5 +267,105 @@ describe("verifyProposal with excluded set", () => {
       const check = verifyProposal(HUB, pass1, ious, account.address, { now: NOW });
       expect(check.ok).toBe(true);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Plan 03 Task 1: collectConsents — wall-clock window with deterministic
+// timeout snapshot (CONS-01, D-02), refusal-as-data (D-07), miss semantics
+// (D-06/D-07). Providers are injected fakes; windows are ms-scale.
+// ---------------------------------------------------------------------------
+
+/** collectConsents only reads `participants`; everything else is inert. */
+function fakeProposal(participants: Address[]): RoundProposal {
+  return {
+    roundNonce: 0n,
+    participants,
+    deltas: participants.map(() => 0n),
+    manifestHash: ("0x" + "00".repeat(32)) as Hex,
+    digest: ("0x" + "00".repeat(32)) as Hex,
+    consumedIds: [],
+  };
+}
+
+const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+function consentAfter(ms: number, signature: Hex): ConsentProvider {
+  return async () => {
+    await delay(ms);
+    return { kind: "consent", signature };
+  };
+}
+
+describe("collectConsents window (CONS-01)", () => {
+  const members = ADDRS.slice(0, 3);
+
+  it("all consent before deadline: resolves early with no timeouts", async () => {
+    const providers = new Map<string, ConsentProvider>(
+      members.map((a, i) => [a.toLowerCase(), consentAfter(5, `0x0${i + 1}` as Hex)]),
+    );
+    const started = Date.now();
+    const out = await collectConsents(fakeProposal(members), [], providers, 50);
+    // Early completion clears the deadline timer — well before the window.
+    expect(Date.now() - started).toBeLessThan(45);
+    expect(out.consents.size).toBe(3);
+    expect(out.refused).toEqual([]);
+    expect(out.timedOut).toEqual([]);
+  });
+
+  it("stalled provider is snapshotted as timed out at the deadline", async () => {
+    const providers = new Map<string, ConsentProvider>([
+      [members[0].toLowerCase(), consentAfter(2, "0x01")],
+      [members[1].toLowerCase(), consentAfter(2, "0x02")],
+      [members[2].toLowerCase(), () => new Promise(() => {})],
+    ]);
+    const out = await collectConsents(fakeProposal(members), [], providers, 30);
+    expect(out.timedOut.map((a) => a.toLowerCase())).toEqual([members[2].toLowerCase()]);
+    expect(out.consents.size).toBe(2);
+    // consents/refused/timedOut partition the member set exactly.
+    expect(out.consents.size + out.refused.length + out.timedOut.length).toBe(members.length);
+  });
+
+  it("refusal is data with its reason, never a throw", async () => {
+    const providers = new Map<string, ConsentProvider>([
+      [members[0].toLowerCase(), consentAfter(2, "0x01")],
+      [members[1].toLowerCase(), async () => ({ kind: "refusal", reason: "delta mismatch" })],
+      [members[2].toLowerCase(), consentAfter(2, "0x03")],
+    ]);
+    const out = await collectConsents(fakeProposal(members), [], providers, 50);
+    expect(out.refused).toEqual([{ address: members[1], reason: "delta mismatch" }]);
+    expect(out.consents.size).toBe(2);
+    expect(out.timedOut).toEqual([]);
+  });
+
+  it("late consent after the snapshot mutates nothing (D-02)", async () => {
+    const windowMs = 25;
+    const providers = new Map<string, ConsentProvider>([
+      [members[0].toLowerCase(), consentAfter(2, "0x01")],
+      [members[1].toLowerCase(), consentAfter(2, "0x02")],
+      [members[2].toLowerCase(), consentAfter(windowMs + 20, "0x03")],
+    ]);
+    const out = await collectConsents(fakeProposal(members), [], providers, windowMs);
+    expect(out.timedOut.map((a) => a.toLowerCase())).toEqual([members[2].toLowerCase()]);
+    const before = new Map(out.consents);
+    await delay(40); // let the late provider settle — snapshot must be immutable
+    expect(out.consents).toEqual(before);
+    expect(out.consents.size + out.refused.length + out.timedOut.length).toBe(members.length);
+  });
+
+  it("miss semantics D-06/D-07: timeout increments, consent resets, refusal unchanged", () => {
+    const missed = new Map<string, number>([
+      [members[0].toLowerCase(), 2],
+      [members[1].toLowerCase(), 1],
+      [members[2].toLowerCase(), 3],
+    ]);
+    applyMissSemantics(missed, {
+      consents: new Map([[members[0].toLowerCase(), "0x01" as Hex]]),
+      refused: [{ address: members[1], reason: "delta mismatch" }],
+      timedOut: [members[2]],
+    });
+    expect(missed.get(members[0].toLowerCase())).toBe(0); // consent → reset
+    expect(missed.get(members[1].toLowerCase())).toBe(1); // refusal → unchanged
+    expect(missed.get(members[2].toLowerCase())).toBe(4); // timeout → increment
   });
 });
