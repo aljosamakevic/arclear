@@ -40,6 +40,7 @@ const coordinator = new Coordinator(
 
 const nonces = new Map<string, bigint>();
 let simulating = false;
+let roundInFlight = false;
 
 const dashboardPath = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -115,12 +116,25 @@ const server = createServer(async (req, res) => {
       return;
     }
     if (req.method === "POST" && req.url === "/round") {
-      // Aborts are expected protocol behavior, not 500s (Pitfall 6) — the
-      // structured outcome is returned as-is; Plan 04 wires the dashboard view.
-      const result = await coordinator.runRound(now());
-      if (result.outcome === "settled") printReport(result.round, env.explorerTx);
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify(result));
+      // WR-03: one round at a time — a second concurrent /round would race
+      // the coordinator's phase writes and burn relayer gas on a guaranteed
+      // on-chain revert.
+      if (roundInFlight) {
+        res.writeHead(409, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "a round is already in flight" }));
+        return;
+      }
+      roundInFlight = true;
+      try {
+        // Aborts are expected protocol behavior, not 500s (Pitfall 6) — the
+        // structured outcome is returned as-is; Plan 04 wires the dashboard view.
+        const result = await coordinator.runRound(now());
+        if (result.outcome === "settled") printReport(result.round, env.explorerTx);
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(result));
+      } finally {
+        roundInFlight = false;
+      }
       return;
     }
     res.writeHead(404);

@@ -428,6 +428,11 @@ export class Coordinator {
 
       const roundNonce = await this.hubClient.roundNonce();
 
+      // WR-03: ONE IOU snapshot per attempt — the proposal and every provider
+      // must verify against the same set even while /simulate streams new
+      // IOUs into `this.ious` mid-round.
+      const openIous = this.openIous;
+
       // Provider map: a stalled persona never answers (D-13); an honest one
       // re-derives the netting from its own view — folding the excluded list
       // into the local recomputation — and refuses AS DATA on any mismatch.
@@ -439,7 +444,7 @@ export class Coordinator {
             const check = verifyProposal(
               this.hub,
               proposal,
-              this.openIous,
+              openIous,
               persona.account.address,
               { now, settledIds: this.settledIds, excluded, chainId: this.chainId },
             );
@@ -490,7 +495,7 @@ export class Coordinator {
       const attempt = await attemptRound({
         hub: this.hub,
         roundNonce,
-        openIous: this.openIous,
+        openIous,
         settledIds: this.settledIds,
         providers,
         windowMs: windowMs ?? this.consentWindowMs,
