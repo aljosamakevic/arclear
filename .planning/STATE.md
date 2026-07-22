@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
-stopped_at: Phase 1 context gathered
-last_updated: "2026-07-22T14:32:00.106Z"
+status: ready_to_plan
+stopped_at: Phase 1 complete (5/5) — ready to discuss Phase 2
+last_updated: 2026-07-22T23:46:57.565Z
 last_activity: 2026-07-22 -- Phase 1 execution started
 progress:
   total_phases: 8
   completed_phases: 0
   total_plans: 5
-  completed_plans: 0
+  completed_plans: 5
   percent: 0
 ---
 
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-22)
 
 **Core value:** A CCP is defined by operating *through* a member failure: the system must keep settling when members stall or default, with every risk mechanism legible, invariant-tested, and honest about its calibration status.
-**Current focus:** Phase 1 — Threshold Consent (brief Phase 0)
+**Current focus:** Phase 2 — merkle manifests & iou redemption (brief phase 1)
 
 ## Current Position
 
-Phase: 1 (Threshold Consent (brief Phase 0)) — EXECUTING
-Plan: 1 of 5
-Status: Executing Phase 1
-Last activity: 2026-07-22 -- Phase 1 execution started
+Phase: 2
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-07-22
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -36,7 +36,7 @@ Progress: [░░░░░░░░░░] 0%
 
 **Velocity:**
 
-- Total plans completed: 0
+- Total plans completed: 5
 - Average duration: -
 - Total execution time: 0 hours
 
@@ -44,7 +44,7 @@ Progress: [░░░░░░░░░░] 0%
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| - | - | - | - |
+| 1 | 5 | - | - |
 
 **Recent Trend:**
 

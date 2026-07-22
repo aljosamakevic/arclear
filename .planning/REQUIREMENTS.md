@@ -13,7 +13,7 @@ Requirements for the v2 milestone (this roadmap). Derived 1:1 from `docs/V2-BRIE
 - [x] **CONS-02**: On timeout, coordinator rebuilds the round from the consenting subset — excluded member's IOUs drop from the manifest, counterparties' deltas are recomputed, and everyone in the final set signs the final digest
 - [x] **CONS-03**: Invariant holds and is tested: every settled balance movement was signed for by its owner over the exact executed position set
 - [x] **CONS-04**: An IOU excluded in round n settles cleanly in round n+1, and the same IOU can never settle twice
-- [ ] **CONS-05**: Exclusion rounds are zero-sum after redistribution; griefing cost (repeated refusal = repeated rebuild latency, never a safety cost) is analyzed and documented
+- [x] **CONS-05**: Exclusion rounds are zero-sum after redistribution; griefing cost (repeated refusal = repeated rebuild latency, never a safety cost) is analyzed and documented
 - [x] **CONS-06**: `ClearingHubV2.sol` ships with the execution path mostly unchanged — the change lives in coordinator/SDK protocol and round-rebuild logic in `round.ts`
 
 ### Merkle Manifests & IOU Redemption (brief Phase 1)
@@ -86,7 +86,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CONS-02 | Phase 1 | Complete |
 | CONS-03 | Phase 1 | Complete |
 | CONS-04 | Phase 1 | Complete |
-| CONS-05 | Phase 1 | Pending |
+| CONS-05 | Phase 1 | Complete |
 | CONS-06 | Phase 1 | Complete |
 | MERK-01 | Phase 2 | Pending |
 | MERK-02 | Phase 2 | Pending |
@@ -111,6 +111,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PVP-02 | Phase 8 | Pending |
 
 **Coverage:**
+
 - v1 requirements: 27 total
 - Mapped to phases: 27
 - Unmapped: 0 ✓

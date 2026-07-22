@@ -169,7 +169,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8. Ex
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Threshold Consent | 5/5 | Complete   | 2026-07-22 |
+| 1. Threshold Consent | 5/5 | Complete    | 2026-07-22 |
 | 2. Merkle Manifests & IOU Redemption | 0/TBD | Not started | - |
 | 3. Calibration Checkpoint | 0/TBD | Not started | - |
 | 4. Novation — ArclearCCP.sol | 0/TBD | Not started | - |
