@@ -82,13 +82,39 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| (populated by roadmapper) | | |
+| CONS-01 | Phase 1 | Pending |
+| CONS-02 | Phase 1 | Pending |
+| CONS-03 | Phase 1 | Pending |
+| CONS-04 | Phase 1 | Pending |
+| CONS-05 | Phase 1 | Pending |
+| CONS-06 | Phase 1 | Pending |
+| MERK-01 | Phase 2 | Pending |
+| MERK-02 | Phase 2 | Pending |
+| MERK-03 | Phase 2 | Pending |
+| MERK-04 | Phase 2 | Pending |
+| CALB-01 | Phase 3 | Pending |
+| CALB-02 | Phase 3 | Pending |
+| NOVA-01 | Phase 4 | Pending |
+| NOVA-02 | Phase 4 | Pending |
+| NOVA-03 | Phase 4 | Pending |
+| MARG-01 | Phase 5 | Pending |
+| MARG-02 | Phase 5 | Pending |
+| MARG-03 | Phase 5 | Pending |
+| MARG-04 | Phase 5 | Pending |
+| MARG-05 | Phase 5 | Pending |
+| WATR-01 | Phase 6 | Pending |
+| WATR-02 | Phase 6 | Pending |
+| WATR-03 | Phase 6 | Pending |
+| MEMB-01 | Phase 7 | Pending |
+| MEMB-02 | Phase 7 | Pending |
+| PVP-01 | Phase 8 | Pending |
+| PVP-02 | Phase 8 | Pending |
 
 **Coverage:**
-- v1 requirements: 25 total
-- Mapped to phases: 0
-- Unmapped: 25 ⚠️ (pending roadmap)
+- v1 requirements: 27 total
+- Mapped to phases: 27
+- Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-07-22*
-*Last updated: 2026-07-22 after initial definition*
+*Last updated: 2026-07-22 after roadmap creation (traceability mapped)*
