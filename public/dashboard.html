@@ -124,13 +124,13 @@ async function poll() {
     $("positions").querySelector("tbody").innerHTML = s.agents.map((a) => {
       const net = BigInt(a.netDelta);
       const cls = net > 0n ? "pos" : net < 0n ? "neg" : "zero";
-      const sign = net > 0n ? "+" : "";
+      const sign = net > 0n ? "+" : net < 0n ? "−" : "";
       const missBadge = a.missedWindows > 0 ? ` <span class="miss">⏱ ${a.missedWindows} missed</span>` : "";
       return `<tr>
         <td>${a.emoji} <b>${a.name}</b>${a.stalled ? " 💤" : ""}${missBadge}<br><span class="addr">${short(a.address)} · ${a.role}</span></td>
         <td class="neg">${usd(a.grossOut)}</td>
         <td class="pos">${usd(a.grossIn)}</td>
-        <td class="${cls}">${sign}${usd(net < 0n ? -net : net) === "$0.00" && net === 0n ? "$0.00" : (net < 0n ? "−" : "") + usd(net < 0n ? -net : net).slice(net < 0n ? 0 : 0)}</td>
+        <td class="${cls}">${sign}${usd(net < 0n ? -net : net)}</td>
         <td>${usd(a.collateral)}</td>
         <td><button class="stall-btn${a.stalled ? " stalled" : ""}" onclick="toggleStall('${a.name}')">${a.stalled ? "💤 stalled" : "stall"}</button></td>
       </tr>`;
