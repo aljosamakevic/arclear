@@ -45,6 +45,10 @@
   .rounds td a { color: var(--accent); text-decoration: none; }
   .muted { color: var(--dim); font-size: 13px; padding: 14px 16px; }
   .addr { font: 11px var(--mono); color: var(--dim); }
+  .stall-btn { background: var(--panel2); color: var(--dim); border: 1px solid var(--line); font: 600 11px var(--mono); padding: 4px 8px; border-radius: 7px; cursor: pointer; }
+  .stall-btn.stalled { background: var(--red); color: #0b0e14; border-color: var(--red); }
+  .miss { font: 11px var(--mono); color: var(--amber); }
+  .excl { font: 11px var(--mono); color: var(--red); }
   @media (max-width: 860px) { .hero { grid-template-columns: repeat(2, 1fr); } .grid { grid-template-columns: 1fr; } }
 </style>
 </head>
@@ -73,7 +77,7 @@
     <div class="panel">
       <h2>Agent positions</h2>
       <table id="positions">
-        <thead><tr><th>Agent</th><th>Paid out</th><th>Received</th><th>Net</th><th>Collateral</th></tr></thead>
+        <thead><tr><th>Agent</th><th>Paid out</th><th>Received</th><th>Net</th><th>Collateral</th><th>Stall</th></tr></thead>
         <tbody></tbody>
       </table>
     </div>
@@ -86,8 +90,8 @@
   <div class="panel" style="margin-top:14px">
     <h2>Executed rounds</h2>
     <table class="rounds" id="rounds">
-      <thead><tr><th>#</th><th>IOUs</th><th>Gross</th><th>Settled</th><th>Compression</th><th>Tx</th></tr></thead>
-      <tbody><tr><td colspan="6" class="muted">No rounds executed yet.</td></tr></tbody>
+      <thead><tr><th>#</th><th>IOUs</th><th>Gross</th><th>Settled</th><th>Compression</th><th>Pass</th><th>Excluded</th><th>Tx</th></tr></thead>
+      <tbody><tr><td colspan="8" class="muted">No rounds executed yet.</td></tr></tbody>
     </table>
   </div>
 </div>
@@ -121,12 +125,14 @@ async function poll() {
       const net = BigInt(a.netDelta);
       const cls = net > 0n ? "pos" : net < 0n ? "neg" : "zero";
       const sign = net > 0n ? "+" : "";
+      const missBadge = a.missedWindows > 0 ? ` <span class="miss">⏱ ${a.missedWindows} missed</span>` : "";
       return `<tr>
-        <td>${a.emoji} <b>${a.name}</b><br><span class="addr">${short(a.address)} · ${a.role}</span></td>
+        <td>${a.emoji} <b>${a.name}</b>${a.stalled ? " 💤" : ""}${missBadge}<br><span class="addr">${short(a.address)} · ${a.role}</span></td>
         <td class="neg">${usd(a.grossOut)}</td>
         <td class="pos">${usd(a.grossIn)}</td>
         <td class="${cls}">${sign}${usd(net < 0n ? -net : net) === "$0.00" && net === 0n ? "$0.00" : (net < 0n ? "−" : "") + usd(net < 0n ? -net : net).slice(net < 0n ? 0 : 0)}</td>
         <td>${usd(a.collateral)}</td>
+        <td><button class="stall-btn${a.stalled ? " stalled" : ""}" onclick="toggleStall('${a.name}')">${a.stalled ? "💤 stalled" : "stall"}</button></td>
       </tr>`;
     }).join("");
 
@@ -145,19 +151,34 @@ async function poll() {
         const link = s.explorerBase
           ? `<a href="${s.explorerBase}/tx/${r.txHash}" target="_blank">${short(r.txHash)} ↗</a>`
           : short(r.txHash);
-        return `<tr><td>${r.roundNonce}</td><td>${r.iouCount}</td><td>${usd(g)}</td><td>${usd(st)}</td><td class="pos">${comp}</td><td>${link}</td></tr>`;
+        // Exclusion rounds (passCount 2 / non-empty excluded) are visibly distinct (D-14).
+        const excludedNames = (r.excluded ?? []).map((addr) => {
+          const a = agentByAddr[addr.toLowerCase()];
+          return a ? `${a.emoji} ${a.name}` : short(addr);
+        }).join(", ");
+        const passCell = r.passCount === 2 ? `<span class="excl">2</span>` : `${r.passCount ?? 1}`;
+        const exclCell = excludedNames ? `<span class="excl">${excludedNames}</span>` : `<span class="zero">—</span>`;
+        return `<tr><td>${r.roundNonce}</td><td>${r.iouCount}</td><td>${usd(g)}</td><td>${usd(st)}</td><td class="pos">${comp}</td><td>${passCell}</td><td>${exclCell}</td><td>${link}</td></tr>`;
       }).join("");
     }
 
     const phases = {
       "idle": "", "netting": "⏳ computing net positions…",
       "collecting-consents": "✍️ " + s.phaseDetail,
+      "rebuilding": "🔁 rebuilding · " + s.phaseDetail,
+      "collecting-consents-pass-2": "✍️ pass 2 · " + s.phaseDetail,
+      "aborted": "🛑 aborted · " + s.phaseDetail,
       "submitting": "📡 submitting settlement…",
       "confirmed": "✅ settled · " + (s.explorerBase ? `<a href="${s.explorerBase}/tx/${s.phaseDetail}" target="_blank">view on ArcScan ↗</a>` : short(s.phaseDetail)),
       "failed": "❌ " + (s.lastError ?? "failed"),
     };
     $("phase").innerHTML = (s.simulating ? "🌀 traffic streaming… " : "") + (phases[s.phase] ?? "");
   } catch (e) { $("phase").textContent = "⚠ server unreachable"; }
+}
+
+async function toggleStall(name) {
+  // Fire the toggle; the next poll refreshes the rendered state.
+  await fetch("/stall?agent=" + encodeURIComponent(name), { method: "POST" });
 }
 
 $("simulateBtn").onclick = async () => { await fetch("/simulate", { method: "POST" }); };
