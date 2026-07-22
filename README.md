@@ -100,14 +100,25 @@ npm run e2e:testnet        # or: npm run demo (dashboard against testnet)
 
 ### Deployed hubs (Arc Testnet, chain 5042002)
 
+**Arclear Net v1** (`ClearingHub` — unanimous consent; stays live):
+
 | token | hub | status |
 | ----- | --- | ------ |
 | USDC `0x3600…0000` | [`0xd5A9ef69b47b0a3C8d326fDABd57aCaFA7D3d6e2`](https://testnet.arcscan.app/address/0xd5A9ef69b47b0a3C8d326fDABd57aCaFA7D3d6e2) | source verified ✓ |
 | EURC `0x89B5…D72a` | [`0x867AD43f216B03c2a79eE02eC56F4bbEf90502c0`](https://testnet.arcscan.app/address/0x867AD43f216B03c2a79eE02eC56F4bbEf90502c0) | source verified ✓ |
 
-Real settlement on the USDC hub — 105 IOUs, $5.52 gross, $0.43 settled,
+Real settlement on the v1 USDC hub — 105 IOUs, $5.52 gross, $0.43 settled,
 92.3% compression, one transaction:
 [`0x64f3c5…a2c69`](https://testnet.arcscan.app/tx/0x64f3c58b0af6efcc622248550a7ca0dd963c35251c3f79b2fd237da89cfa2c69)
+
+**Arclear Net v2** (`ClearingHubV2` — threshold consent: two-pass
+exclude-and-recompute, execution path identical to v1; set these as
+`HUB_V2_USDC` / `HUB_V2_EURC` in `.env`, v1 keys stay):
+
+| token | hub | status |
+| ----- | --- | ------ |
+| USDC `0x3600…0000` | [`0xa984c64e1eA12B5aF5F573d58C3483fB8aB47f3c`](https://testnet.arcscan.app/address/0xa984c64e1eA12B5aF5F573d58C3483fB8aB47f3c) | source verified ✓ |
+| EURC `0x89B5…D72a` | [`0x57A047599EaCDbe77Cc8C1A7978f88D700332Cb3`](https://testnet.arcscan.app/address/0x57A047599EaCDbe77Cc8C1A7978f88D700332Cb3) | source verified ✓ |
 
 > Gas-token gotcha (documented so you don't rediscover it): USDC is Arc's
 > native gas token *and* the ERC-20 at `0x3600…0000` — one balance, two
@@ -159,9 +170,12 @@ data says scale the pool before you underwrite it.
   is structurally harmless — it holds no keys, every participant recomputes
   the netting before consenting (`verifyProposal`), and any tampering breaks
   the shared digest. Fuzz tests assert every perturbation reverts.
-- **Liveness is cooperative**: one unresponsive participant stalls a round
-  (never loses anyone money — the round aborts atomically; withdrawal is
-  never pausable). Response: rebuild without them, stop extending them credit.
+- **Liveness is bounded (v2)**: an unresponsive participant no longer stalls
+  settlement — threshold consent excludes non-responders in one deterministic
+  batch and rebuilds the round from the consenting subset (worst case two
+  signature-collection passes: a latency cost, never a safety cost; spec in
+  [PROTOCOL.md](docs/PROTOCOL.md)). Withdrawal is never pausable, and credit
+  caps still bound a staller's paper.
 - **Credit between rounds is a bounded bet**: the SDK's bilateral caps limit
   worst-case loss per counterparty to the cap you configured.
 - No upgradeability, no fees, no owner access to funds.
@@ -173,9 +187,9 @@ Full checklist: [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md). Protocol spec:
 
 In order, per the sweep data:
 
-1. **Threshold consent** — non-signers are *excluded and recomputed*, never
-   outvoted; the final set still signs unanimously, preserving
-   consent-before-settlement.
+1. **Threshold consent** — ✅ shipped (`ClearingHubV2`, live on Arc Testnet
+   above): non-signers are *excluded and recomputed*, never outvoted; the
+   final set still signs unanimously, preserving consent-before-settlement.
 2. **Merkle manifests** (same `bytes32` field, no contract change) →
    per-IOU inclusion/non-inclusion proofs → **on-chain IOU redemption**
    against a defaulter's collateral.
