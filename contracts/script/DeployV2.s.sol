@@ -15,7 +15,7 @@ contract DeployV2 is Script {
     function run() external {
         address token = vm.envAddress("TOKEN_ADDRESS");
         vm.startBroadcast();
-        ClearingHubV2 hub = new ClearingHubV2(IERC20(token));
+        ClearingHubV2 hub = new ClearingHubV2(IERC20(token), 3, 16, 86400);
         vm.stopBroadcast();
         console.log("ClearingHubV2 deployed for token %s at %s", token, address(hub));
     }
