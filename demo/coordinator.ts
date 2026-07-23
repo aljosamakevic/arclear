@@ -9,6 +9,7 @@ import {
   verifyProposal,
 } from "../src/round.js";
 import { clearingHubAbi, HubClient } from "../src/client.js";
+import { clearingHubV2Abi } from "../src/abi/ClearingHubV2.js";
 import type { NetResult, RoundProposal, SignedIou } from "../src/types.js";
 import type { AgentPersona } from "./agents.js";
 
@@ -208,6 +209,9 @@ export async function attemptRound(args: {
   roundNonce: bigint;
   openIous: SignedIou[];
   settledIds: ReadonlySet<Hex>;
+  /** Ids extinguished on-chain via redeemIOU — excluded from netting exactly
+   * like settledIds (D-14 off-chain half). */
+  redeemedIds?: ReadonlySet<Hex>;
   providers: Map<string, ConsentProvider>;
   windowMs: number;
   now: bigint;
@@ -215,9 +219,9 @@ export async function attemptRound(args: {
   submit: (proposal: RoundProposal, signatures: Hex[]) => Promise<Hex>;
   onPhase?: (phase: RoundPhase, detail: string) => void;
 }): Promise<RoundAttemptOutcome> {
-  const { hub, roundNonce, openIous, settledIds, providers, windowMs, now, chainId, submit } =
+  const { hub, roundNonce, openIous, settledIds, redeemedIds, providers, windowMs, now, chainId, submit } =
     args;
-  const opts = { now, settledIds, chainId };
+  const opts = { now, settledIds, redeemedIds, chainId };
 
   const result = net(openIous, opts);
   if (result.participants.length < 2) {
@@ -330,6 +334,11 @@ export interface ExecutedRound {
 export class Coordinator {
   ious: SignedIou[] = [];
   settledIds = new Set<Hex>();
+  /** Ids extinguished on-chain via redeemIOU (D-14). Kept SEPARATE from
+   * settledIds so the dashboard/report can distinguish settled-by-round from
+   * recovered-by-redemption. Folded ONLY from confirmed IouRedeemed chain
+   * logs — never from miss counters, which are early warning only (D-09). */
+  redeemedIds = new Set<Hex>();
   phase: RoundPhase = "idle";
   phaseDetail = "";
   rounds: ExecutedRound[] = [];
@@ -363,9 +372,41 @@ export class Coordinator {
     this.ious.push(...batch);
   }
 
-  /** IOUs not yet consumed by an executed round. */
+  /** IOUs not yet consumed by an executed round nor redeemed on-chain. */
   get openIous(): SignedIou[] {
-    return this.ious.filter((s) => !this.settledIds.has(s.id.toLowerCase() as Hex));
+    return this.ious.filter(
+      (s) =>
+        !this.settledIds.has(s.id.toLowerCase() as Hex) &&
+        !this.redeemedIds.has(s.id.toLowerCase() as Hex),
+    );
+  }
+
+  /** Highest block already folded into redeemedIds; scans resume here. */
+  private redemptionScanBlock = 0n;
+
+  /**
+   * D-14 (off-chain half): redemption happens OUTSIDE the coordinator — a
+   * creditor submits redeemIOU directly — so the coordinator's view must
+   * converge from chain logs alone. Fold every confirmed IouRedeemed event's
+   * id into redeemedIds so redeemed paper can never re-enter a proposal.
+   * Miss counters are never consulted: on-chain nullifiers are the only
+   * source of redemption truth (D-09).
+   */
+  private async reconcileRedeemedIds(): Promise<void> {
+    const tip = await this.pub.getBlockNumber();
+    const logs = await this.pub.getContractEvents({
+      address: this.hub,
+      abi: clearingHubV2Abi,
+      eventName: "IouRedeemed",
+      fromBlock: this.redemptionScanBlock,
+    });
+    for (const l of logs) {
+      const id = l.args.id;
+      if (id) this.redeemedIds.add(id.toLowerCase() as Hex);
+    }
+    // Next scan re-covers the tip block — the Set fold is idempotent, so an
+    // overlapping range can never double-count and a race can never skip.
+    this.redemptionScanBlock = tip;
   }
 
   /**
@@ -432,6 +473,11 @@ export class Coordinator {
         return { outcome: "aborted", reason: reconciled.reason, excluded: [], passCount: 0 };
       }
 
+      // D-14: converge redeemedIds with on-chain nullifier state before
+      // netting — a redemption submitted by any creditor since the last round
+      // must drop its paper from this round's candidate view.
+      await this.reconcileRedeemedIds();
+
       const roundNonce = await this.hubClient.roundNonce();
 
       // WR-03: ONE IOU snapshot per attempt — the proposal and every provider
@@ -455,6 +501,7 @@ export class Coordinator {
               {
                 now,
                 settledIds: this.settledIds,
+                redeemedIds: this.redeemedIds,
                 excluded,
                 chainId: this.chainId,
                 // WR-06: pin the proposal to the round nonce read from chain.
@@ -512,6 +559,7 @@ export class Coordinator {
         roundNonce,
         openIous,
         settledIds: this.settledIds,
+        redeemedIds: this.redeemedIds,
         providers,
         windowMs: windowMs ?? this.consentWindowMs,
         now,
@@ -589,7 +637,11 @@ export class Coordinator {
   /** Aggregate stats for the dashboard. */
   async state(now: bigint) {
     const open = this.openIous;
-    const preview = net(this.ious, { now, settledIds: this.settledIds });
+    const preview = net(this.ious, {
+      now,
+      settledIds: this.settledIds,
+      redeemedIds: this.redeemedIds,
+    });
     const collateral: Record<string, string> = {};
     for (const p of this.personas) {
       collateral[p.account.address] = (
