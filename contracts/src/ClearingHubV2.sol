@@ -266,6 +266,117 @@ contract ClearingHubV2 is EIP712, Ownable2Step, Pausable, ReentrancyGuard {
         emit RoundExecuted(nonce_, digest, root, n, settledVolume);
     }
 
+    /// @notice Redeem an unconsumed IOU against an unresponsive debtor's
+    ///         collateral: debits the debtor by the full amount, credits the
+    ///         creditor, and nullifies the id so no later round can net it.
+    ///         Permissionless — a relayer can submit; funds only ever credit
+    ///         the IOU's named creditor.
+    /// @dev    The staleness gate is the on-chain criterion "absent from the
+    ///         last >= K executed rounds", i.e. `roundNonce - lastRound[iou.debtor] >= K`
+    ///         — NOT coordinator wall-clock consent windows, which are only an
+    ///         off-chain early-warning signal (D-09). With `lastRound` 1-based,
+    ///         a never-participated debtor (lastRound == 0) is stale once
+    ///         `roundNonce >= K`: they have ignored every executed round that
+    ///         ever existed.
+    ///
+    ///         Coverage precondition (D-15): if `roundNonce <= RING`, no root
+    ///         was ever evicted and the full history is verifiable. Otherwise
+    ///         the oldest buffered round must have executed strictly before
+    ///         `expiry - MAX_IOU_LIFETIME`. Safety argument: under the SDK
+    ///         signing convention `expiry <= signTime + L` (with the netting
+    ///         engine's 60s safety window assumed to cover proposal-to-execution
+    ///         latency), any round consuming this IOU executed inside
+    ///         [expiry - L, expiry) — so when the oldest buffered root predates
+    ///         `expiry - L`, every possible consuming round is still buffered
+    ///         and the proof set is complete for honest debtors. A debtor who
+    ///         violates the convention weakens only their own double-claim
+    ///         protection (only the debtor signs IOUs, and redemption only
+    ///         debits the debtor). Fail-closed: `expiry <= L` with evicted
+    ///         history can never satisfy the window (the would-be underflow
+    ///         branch reverts). There is deliberately NO block.timestamp-vs-
+    ///         expiry check — expiry bounds netting, not recovery; redemption
+    ///         stays valid after expiry (D-07d).
+    ///
+    ///         The contract derives the required proof set itself: exactly one
+    ///         non-inclusion proof per buffered round, positionally matched to
+    ///         ascending nonces — a prover can never choose which roots to
+    ///         answer for. If a round lands between proof generation and this
+    ///         call being mined, `roundNonce` moves, so the count/positional
+    ///         match fails and the call reverts; the creditor simply
+    ///         regenerates proofs (TOCTOU-safe: no silently uncovered round).
+    ///
+    ///         Redemption is best-effort recovery of posted, still-present
+    ///         collateral — it races the deliberately never-pausable
+    ///         `withdraw` by design; there is no lock and must not be one.
+    ///         `whenNotPaused` gives circuit-breaker parity with
+    ///         `executeRound` (redemption is a settlement op); the exit
+    ///         guarantee lives solely in `withdraw`, which no pause touches.
+    /// @param iou The obligation exactly as the debtor signed it (hashIou is the id).
+    /// @param sig The debtor's EIP-712 signature over hashIou(iou).
+    /// @param proofs One non-inclusion proof per buffered round, ascending by
+    ///        round nonce; sentinel (empty-manifest) roots pass structurally.
+    function redeemIOU(
+        Iou calldata iou,
+        bytes calldata sig,
+        ManifestMerkle.NonInclusionProof[] calldata proofs
+    ) external whenNotPaused nonReentrant {
+        // (0) trivia gates
+        if (iou.amount == 0) revert ZeroAmount();
+        if (iou.debtor == iou.creditor) revert SelfIou();
+
+        uint64 nonce_ = roundNonce;
+
+        // (1) staleness: absent from the last >= K executed rounds, i.e.
+        //     roundNonce - lastRound[debtor] >= K (additive form, no underflow;
+        //     never-participated debtors are stale once roundNonce >= K).
+        uint64 seen = lastRound[iou.debtor];
+        if (nonce_ < seen + K) revert DebtorNotStale(seen, K);
+
+        // (2) coverage (D-15): full history buffered, or every possible
+        //     consuming round still buffered. Explicit underflow guard on
+        //     expiry - L keeps the evicted+short-lived case fail-closed.
+        if (nonce_ > RING) {
+            uint64 oldestExecutedAt = rootRing[(nonce_ - RING) % RING].executedAt;
+            uint64 windowStart = iou.expiry > MAX_IOU_LIFETIME ? iou.expiry - MAX_IOU_LIFETIME : 0;
+            if (iou.expiry <= MAX_IOU_LIFETIME || oldestExecutedAt >= windowStart) {
+                revert CoverageWindowNotBuffered(oldestExecutedAt, windowStart);
+            }
+        }
+
+        // (3) debtor consent: the signature is over the same digest that is the id.
+        bytes32 id = hashIou(iou);
+        if (ECDSA.recover(id, sig) != iou.debtor) revert BadIouSignature();
+
+        // (4) nullifier
+        if (redeemed[id]) revert AlreadyRedeemed(id);
+
+        // (5) contract-derived proof regime: exactly one proof per buffered
+        //     round, positionally matched to ascending nonces (Pitfall 5).
+        uint256 expected = nonce_ < RING ? nonce_ : RING;
+        if (proofs.length != expected) revert ProofCountMismatch(expected, proofs.length);
+        uint64 start = nonce_ > RING ? nonce_ - RING : 0;
+        for (uint256 i; i < expected; ++i) {
+            // `% RING` is ring-buffer index arithmetic, not protocol-value math.
+            uint64 bufferedNonce = start + uint64(i);
+            bytes32 root = rootRing[bufferedNonce % RING].root;
+            if (!ManifestMerkle.verifyNonInclusion(id, proofs[i], root)) {
+                revert NonInclusionProofInvalid(bufferedNonce);
+            }
+        }
+
+        // (6) effects: nullify, move collateral debtor -> creditor in full
+        //     (no partial redemption — the nullifier is boolean). Hub token
+        //     balance untouched: collateral conservation, same as rounds.
+        redeemed[id] = true;
+        uint256 balance = collateral[iou.debtor];
+        if (balance < iou.amount) {
+            revert InsufficientCollateral(iou.debtor, balance, iou.amount);
+        }
+        collateral[iou.debtor] = balance - iou.amount;
+        collateral[iou.creditor] += iou.amount;
+        emit IouRedeemed(id, iou.debtor, iou.creditor, iou.amount, nonce_);
+    }
+
     /// @notice EIP-712 digest every participant signs. Public so off-chain
     ///         implementations can assert encoding parity against the chain.
     function hashRound(
