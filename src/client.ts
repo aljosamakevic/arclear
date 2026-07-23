@@ -1,6 +1,7 @@
 import {
   createPublicClient,
   createWalletClient,
+  decodeFunctionData,
   http,
   type Address,
   type Hex,
@@ -11,7 +12,7 @@ import type { Account } from "viem/accounts";
 import { arcTestnet, MIN_MAX_FEE_PER_GAS } from "./domain.js";
 import { clearingHubAbi } from "./abi/ClearingHub.js";
 import { clearingHubV2Abi } from "./abi/ClearingHubV2.js";
-import type { InclusionProof, NonInclusionProof } from "./merkle.js";
+import { nonInclusionProof, type InclusionProof, type NonInclusionProof } from "./merkle.js";
 import type { Iou, RoundProposal } from "./types.js";
 
 export { clearingHubAbi };
@@ -88,6 +89,108 @@ export class HubClient {
       abi: clearingHubV2Abi,
       functionName: "token",
     });
+  }
+
+  /** Nonce of the round AFTER the participant's last consented round (0 = never). */
+  lastRound(participant: Address): Promise<bigint> {
+    return this.pub
+      .readContract({
+        address: this.hub,
+        abi: clearingHubV2Abi,
+        functionName: "lastRound",
+        args: [participant],
+      })
+      .then(BigInt);
+  }
+
+  /** Nullifier check: has this IOU id already been redeemed on-chain? */
+  redeemed(id: Hex): Promise<boolean> {
+    return this.pub.readContract({
+      address: this.hub,
+      abi: clearingHubV2Abi,
+      functionName: "redeemed",
+      args: [id],
+    });
+  }
+
+  /** Buffered manifest root at ring slot `nonce % RING`. */
+  rootRing(slot: bigint): Promise<{ root: Hex; nonce: bigint; executedAt: bigint }> {
+    return this.pub
+      .readContract({
+        address: this.hub,
+        abi: clearingHubV2Abi,
+        functionName: "rootRing",
+        args: [slot],
+      })
+      .then(([root, nonce, executedAt]) => ({
+        root,
+        nonce: BigInt(nonce),
+        executedAt: BigInt(executedAt),
+      }));
+  }
+
+  /** On-chain IOU digest — parity-locked against the SDK's iouId. */
+  hashIou(iou: Iou): Promise<Hex> {
+    return this.pub.readContract({
+      address: this.hub,
+      abi: clearingHubV2Abi,
+      functionName: "hashIou",
+      args: [iou],
+    });
+  }
+
+  /** The hub's RING immutable: how many executed-round roots stay buffered. */
+  ringSize(): Promise<bigint> {
+    return this.pub
+      .readContract({ address: this.hub, abi: clearingHubV2Abi, functionName: "RING" })
+      .then(BigInt);
+  }
+
+  /**
+   * Reconstruct round `nonce`'s consumed-id manifest from executeRound
+   * calldata. The id list is signature-bound: the unanimously signed digest
+   * commits to the merkle root the contract derived from this exact calldata,
+   * so a creditor needs only an RPC endpoint — NEVER a coordinator endpoint,
+   * which could serve a fabricated leaf set to break non-inclusion proofs.
+   */
+  async fetchManifest(nonce: bigint): Promise<Hex[]> {
+    const logs = await this.pub.getContractEvents({
+      address: this.hub,
+      abi: clearingHubV2Abi,
+      eventName: "RoundExecuted",
+      args: { roundNonce: nonce },
+      fromBlock: 0n,
+    });
+    if (logs.length === 0) {
+      throw new Error(`no RoundExecuted event for round nonce ${nonce} at hub ${this.hub}`);
+    }
+    const tx = await this.pub.getTransaction({ hash: logs[logs.length - 1].transactionHash });
+    const { functionName, args } = decodeFunctionData({ abi: clearingHubV2Abi, data: tx.input });
+    if (functionName !== "executeRound") {
+      throw new Error(`round ${nonce} tx ${tx.hash} is not an executeRound call`);
+    }
+    return [...args[3]];
+  }
+
+  /**
+   * Assemble the full contract-shaped proof array for redeeming `id`: the
+   * buffered nonce range is derived from on-chain roundNonce/RING exactly as
+   * redeemIOU derives it (ascending, count = min(roundNonce, RING)) — never
+   * caller-chosen. Empty manifests yield the structurally-valid placeholder
+   * (the contract short-circuits sentinel roots without reading content).
+   * TOCTOU: if a round lands before the redemption mines, the contract's
+   * count/position check reverts and the caller simply regenerates.
+   */
+  async prepareRedemptionProofs(id: Hex): Promise<NonInclusionProof[]> {
+    const nonce = await this.roundNonce();
+    const ring = await this.ringSize();
+    const count = nonce < ring ? nonce : ring;
+    const proofs: NonInclusionProof[] = [];
+    for (let n = nonce - count; n < nonce; n++) {
+      const ids = await this.fetchManifest(n);
+      proofs.push(nonInclusionProof(ids, id));
+    }
+    return proofs;
   }
 
   /** On-chain digest — used to assert parity with the SDK's roundDigest. */
