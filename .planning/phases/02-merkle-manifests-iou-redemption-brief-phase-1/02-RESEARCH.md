@@ -474,7 +474,9 @@ function hashIou(Iou calldata iou) public view returns (bytes32) {
 | A6 | MERK-01's "no ClearingHub interface change" scopes to the manifestHash bytes32 field / signed Round struct, not to `executeRound`'s ABI on the redeployed V2 (which D-14's on-chain nullifier check forces to change) | Critical Q5b | If the user intended a frozen `executeRound` ABI, D-14's on-chain half is unimplementable and must be renegotiated (off-chain-only filtering). Surface at plan review `[ASSUMED — resolved from decision-text analysis]` |
 | A7 | `L = MAX_IOU_LIFETIME` default (suggest 24h) and its interaction with k=16/K=3 are acceptable as uncalibrated labels pending Phase 3 | Critical Q1 | Redemption window too narrow/wide in practice — calibration is explicitly deferred; label per project convention `[ASSUMED]` |
 
-## Open Questions
+## Open Questions (RESOLVED)
+
+> All three resolved by plan 02-04 objective locks: redeemIOU pausable (withdraw alone unpausable); coverage uses executedAt(oldest) < expiry - L with A5 documented; lastRound written for ALL participants incl. zero-delta.
 
 1. **Should `redeemIOU` be pausable?**
    - What we know: `withdraw` must never be pausable (D-12); `executeRound`/`deposit` are pausable circuit-breakers; redemption moves funds between collateral accounts like a round does.
