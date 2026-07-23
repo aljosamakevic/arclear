@@ -80,8 +80,8 @@ Plans:
 Plans:
 **Wave 1** *(parallel)*
 
-- [ ] 02-01-PLAN.md — src/merkle.ts sorted-leaf merkle lib + fast-check property suite (wave 1)
-- [ ] 02-02-PLAN.md — ManifestMerkle.sol library + unit/adversarial fuzz tests (wave 1)
+- [x] 02-01-PLAN.md — src/merkle.ts sorted-leaf merkle lib + fast-check property suite (wave 1)
+- [x] 02-02-PLAN.md — ManifestMerkle.sol library + unit/adversarial fuzz tests (wave 1)
 
 **Wave 2**
 
@@ -200,7 +200,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8. Ex
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Threshold Consent | 5/5 | Complete    | 2026-07-22 |
-| 2. Merkle Manifests & IOU Redemption | 0/8 | Planned | - |
+| 2. Merkle Manifests & IOU Redemption | 2/8 | In Progress|  |
 | 3. Calibration Checkpoint | 0/TBD | Not started | - |
 | 4. Novation — ArclearCCP.sol | 0/TBD | Not started | - |
 | 5. Margin | 0/TBD | Not started | - |
