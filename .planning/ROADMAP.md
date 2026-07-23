@@ -75,7 +75,37 @@ Plans:
   3. A creditor can call `redeemIOU(iou, sig, proofs[])` with non-inclusion proofs against the last k round roots and debit an unresponsive debtor's collateral directly — gated to debtors flagged after missing K consecutive consent windows
   4. Nullifier mapping prevents re-redemption; redeem→cannot-net and net→cannot-redeem exclusivity is tested
 
-**Plans**: TBD
+**Plans**: 8 plans
+
+Plans:
+**Wave 1** *(parallel)*
+
+- [ ] 02-01-PLAN.md — src/merkle.ts sorted-leaf merkle lib + fast-check property suite (wave 1)
+- [ ] 02-02-PLAN.md — ManifestMerkle.sol library + unit/adversarial fuzz tests (wave 1)
+
+**Wave 2**
+
+- [ ] 02-03-PLAN.md — manifestHash root swap, merkle.json + iouSig fixtures, MerkleParity.t.sol (wave 2)
+
+**Wave 3**
+
+- [ ] 02-04-PLAN.md — ClearingHubV2 extension: consumedIds executeRound, rootRing, lastRound, hashIou, redeemIOU; DeployV2 + parity constructor fix (wave 3)
+
+**Wave 4**
+
+- [ ] 02-05-PLAN.md — RoundBuilderV2 harness, redeemIOU revert matrix, bidirectional exclusivity, fuzz, measured gas (wave 4)
+
+**Wave 5**
+
+- [ ] 02-06-PLAN.md — SDK wiring: V2 ABI rebind, gas formula, redeemIOU/fetchManifest/prepareRedemptionProofs, L-convention, net() redeemedIds (wave 5)
+
+**Wave 6**
+
+- [ ] 02-07-PLAN.md — Coordinator redeemed-id reconciliation + e2e redemption scenario (wave 6)
+
+**Wave 7**
+
+- [ ] 02-08-PLAN.md — PROTOCOL/THREAT-MODEL/README docs, Arc testnet redeploy (USDC+EURC), human verify (wave 7)
 
 Note: Phases 1+2 complete = shippable "Arclear Net v2" release (showcase resubmission moment).
 
@@ -170,7 +200,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8. Ex
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Threshold Consent | 5/5 | Complete    | 2026-07-22 |
-| 2. Merkle Manifests & IOU Redemption | 0/TBD | Not started | - |
+| 2. Merkle Manifests & IOU Redemption | 0/8 | Planned | - |
 | 3. Calibration Checkpoint | 0/TBD | Not started | - |
 | 4. Novation — ArclearCCP.sol | 0/TBD | Not started | - |
 | 5. Margin | 0/TBD | Not started | - |
