@@ -101,7 +101,7 @@ Plans:
 
 **Wave 6**
 
-- [ ] 02-07-PLAN.md — Coordinator redeemed-id reconciliation + e2e redemption scenario (wave 6)
+- [x] 02-07-PLAN.md — Coordinator redeemed-id reconciliation + e2e redemption scenario (wave 6)
 
 **Wave 7**
 
@@ -200,7 +200,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8. Ex
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Threshold Consent | 5/5 | Complete    | 2026-07-22 |
-| 2. Merkle Manifests & IOU Redemption | 6/8 | In Progress|  |
+| 2. Merkle Manifests & IOU Redemption | 7/8 | In Progress|  |
 | 3. Calibration Checkpoint | 0/TBD | Not started | - |
 | 4. Novation — ArclearCCP.sol | 0/TBD | Not started | - |
 | 5. Margin | 0/TBD | Not started | - |
