@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
 
+import {console2} from "forge-std/Test.sol";
 import {RoundBuilderV2} from "./utils/RoundBuilderV2.sol";
 import {ClearingHubV2} from "../src/ClearingHubV2.sol";
 import {ManifestMerkle} from "../src/lib/ManifestMerkle.sol";
@@ -288,5 +289,171 @@ contract ClearingHubV2Test is RoundBuilderV2 {
         vm.prank(actors[0]);
         hub.withdraw(10e6); // exit must never be pausable (D-12)
         assertEq(usdc.balanceOf(actors[0]), 10e6);
+    }
+
+    // ------------------------------------------------------------------ fuzz
+
+    /// Stale setup where every buffered round carries a distinct NON-EMPTY
+    /// manifest, so no proof is a sentinel short-circuit and positional
+    /// mismatches are always detectable.
+    function _staleSetupWithManifests()
+        internal
+        returns (ClearingHubV2.Iou memory iou, bytes memory sig, bytes32 id)
+    {
+        _fundAndDeposit(actors[0], 10e6);
+        iou = _makeIou(actors[0], actors[1], 5e6, 1);
+        sig = _signIou(keys[0], iou);
+        id = hub.hashIou(iou);
+        for (uint256 r; r < K; ++r) {
+            _executeRoundWithout(actors[0], _manifest(3, keccak256(abi.encode("fuzz-round", r))));
+        }
+    }
+
+    /// T-02-21: a fuzz-chosen proof removed (count mismatch) or two proofs
+    /// swapped (positional mismatch) always reverts, state untouched.
+    function testFuzz_redeemProofSetSkip_reverts(uint256 seed) public {
+        (ClearingHubV2.Iou memory iou, bytes memory sig, bytes32 id) = _staleSetupWithManifests();
+        ManifestMerkle.NonInclusionProof[] memory full = _proofsFor(id);
+        uint256 debtorBefore = hub.collateral(actors[0]);
+        uint256 creditorBefore = hub.collateral(actors[1]);
+
+        if (seed % 2 == 0) {
+            // remove one fuzz-chosen proof: contract demands exactly 3
+            uint256 drop = (seed >> 8) % 3;
+            ManifestMerkle.NonInclusionProof[] memory bad =
+                new ManifestMerkle.NonInclusionProof[](2);
+            uint256 j;
+            for (uint256 i; i < 3; ++i) {
+                if (i != drop) bad[j++] = full[i];
+            }
+            vm.expectRevert(
+                abi.encodeWithSelector(ClearingHubV2.ProofCountMismatch.selector, 3, 2)
+            );
+            hub.redeemIOU(iou, sig, bad);
+        } else {
+            // swap two distinct positions: proofs are pinned to ascending
+            // nonces, and distinct manifests mean distinct roots
+            uint256 i_ = seed % 3;
+            uint256 j_ = (i_ + 1 + ((seed >> 8) % 2)) % 3;
+            (full[i_], full[j_]) = (full[j_], full[i_]);
+            vm.expectRevert(); // NonInclusionProofInvalid at first mismatched nonce
+            hub.redeemIOU(iou, sig, full);
+        }
+
+        assertEq(hub.roundNonce(), 3, "state must be untouched");
+        assertEq(hub.collateral(actors[0]), debtorBefore, "debtor balance moved");
+        assertEq(hub.collateral(actors[1]), creditorBefore, "creditor balance moved");
+    }
+
+    /// T-02-22: after one successful redemption, fuzz-perturbed re-attempts
+    /// always revert AlreadyRedeemed (nullifier precedes proof checks) and
+    /// balances never move again.
+    function testFuzz_redeemNullifierIdempotent(uint256 seed) public {
+        (ClearingHubV2.Iou memory iou, bytes memory sig, bytes32 id) = _staleSetupWithManifests();
+        hub.redeemIOU(iou, sig, _proofsFor(id));
+        uint256 debtorAfter = hub.collateral(actors[0]);
+        uint256 creditorAfter = hub.collateral(actors[1]);
+
+        ManifestMerkle.NonInclusionProof[] memory proofs = _proofsFor(id);
+        uint256 mode = seed % 3;
+        if (mode == 1) {
+            proofs = new ManifestMerkle.NonInclusionProof[]((seed >> 8) % 3); // wrong count
+        } else if (mode == 2) {
+            proofs[(seed >> 8) % 3].a.leaf = bytes32(seed); // garbage contents
+        } // mode 0: byte-identical replay
+
+        vm.expectRevert(abi.encodeWithSelector(ClearingHubV2.AlreadyRedeemed.selector, id));
+        hub.redeemIOU(iou, sig, proofs);
+
+        assertEq(hub.collateral(actors[0]), debtorAfter, "debtor balance moved again");
+        assertEq(hub.collateral(actors[1]), creditorAfter, "creditor balance moved again");
+        assertTrue(hub.redeemed(id), "nullifier must stay set");
+    }
+
+    /// T-02-21: perturbing index / leafCount / one sibling of a fuzz-chosen
+    /// proof in an otherwise-valid set always reverts at that proof's nonce.
+    function testFuzz_redeemProofPerturbation_reverts(uint256 seed) public {
+        (ClearingHubV2.Iou memory iou, bytes memory sig, bytes32 id) = _staleSetupWithManifests();
+        ManifestMerkle.NonInclusionProof[] memory proofs = _proofsFor(id);
+        uint256 debtorBefore = hub.collateral(actors[0]);
+        uint256 creditorBefore = hub.collateral(actors[1]);
+
+        uint256 k = seed % 3;
+        uint256 mode = (seed >> 8) % 3;
+        if (mode == 0) {
+            proofs[k].a.index += 1; // breaks kind-position binding / adjacency
+        } else if (mode == 1) {
+            // 3 -> 8 leaves: the full-tree schedule demands 3 siblings, the
+            // proof carries at most 2 — schedule mismatch, never verifies
+            proofs[k].a.leafCount += 5;
+        } else {
+            uint256 sc = proofs[k].a.siblings.length;
+            uint256 si = (seed >> 16) % sc;
+            proofs[k].a.siblings[si] =
+                proofs[k].a.siblings[si] ^ bytes32(uint256(1) << ((seed >> 24) % 256));
+        }
+
+        vm.expectRevert(
+            abi.encodeWithSelector(ClearingHubV2.NonInclusionProofInvalid.selector, uint64(k))
+        );
+        hub.redeemIOU(iou, sig, proofs);
+
+        assertEq(hub.roundNonce(), 3, "state must be untouched");
+        assertEq(hub.collateral(actors[0]), debtorBefore, "debtor balance moved");
+        assertEq(hub.collateral(actors[1]), creditorBefore, "creditor balance moved");
+    }
+
+    // ------------------------------------------------------------------- gas
+
+    /// Worst-case (fresh-state, all-cold) executeRound with n=5 participants
+    /// and an m-id manifest; measured via gasleft() deltas around the call.
+    function _gasExecuteRound(uint256 m) internal returns (uint256 used) {
+        address[] memory p = new address[](5);
+        int256[] memory d = new int256[](5);
+        for (uint256 i; i < 5; ++i) {
+            p[i] = actors[i];
+        }
+        (d[0], d[1], d[2], d[3], d[4]) =
+            (int256(-3e6), int256(1e6), int256(2e6), int256(-1e6), int256(1e6));
+        _fundAndDeposit(actors[0], 10e6);
+        _fundAndDeposit(actors[3], 10e6);
+        bytes32[] memory ids = _manifest(m, "gas-manifest");
+        bytes[] memory sigs = _buildSignatures(0, p, d, ids);
+
+        uint256 g0 = gasleft();
+        hub.executeRound(0, p, d, ids, sigs);
+        used = g0 - gasleft();
+        assertEq(hub.roundNonce(), 1, "round must have executed");
+    }
+
+    function test_gas_executeRound_m10() public {
+        console2.log("gas_executeRound n=5 m=10:", _gasExecuteRound(10));
+    }
+
+    function test_gas_executeRound_m105() public {
+        console2.log("gas_executeRound n=5 m=105:", _gasExecuteRound(105));
+    }
+
+    function test_gas_executeRound_m250() public {
+        console2.log("gas_executeRound n=5 m=250:", _gasExecuteRound(250));
+    }
+
+    /// redeemIOU with the full RING=16 populated: 16 real (non-sentinel)
+    /// non-inclusion proofs over 8-id manifests.
+    function test_gas_redeemIOU_ring16() public {
+        _fundAndDeposit(actors[0], 10e6);
+        ClearingHubV2.Iou memory iou = _makeIou(actors[0], actors[1], 5e6, 1);
+        bytes memory sig = _signIou(keys[0], iou);
+        bytes32 id = hub.hashIou(iou);
+        for (uint256 r; r < 16; ++r) {
+            _executeRoundWithout(actors[0], _manifest(8, keccak256(abi.encode("gas-ring", r))));
+        }
+        ManifestMerkle.NonInclusionProof[] memory proofs = _proofsFor(id);
+
+        uint256 g0 = gasleft();
+        hub.redeemIOU(iou, sig, proofs);
+        uint256 used = g0 - gasleft();
+        console2.log("gas_redeemIOU RING=16 (8-id manifests):", used);
+        assertEq(hub.collateral(actors[1]), 5e6, "redemption must have settled");
     }
 }
