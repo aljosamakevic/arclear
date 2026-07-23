@@ -1,24 +1,23 @@
 import {
-  concat,
   hashTypedData,
-  keccak256,
   verifyTypedData,
   type Address,
   type Hex,
 } from "viem";
 import type { Account } from "viem/accounts";
 import { domain, ROUND_TYPES } from "./domain.js";
+import { merkleRoot } from "./merkle.js";
 import { net } from "./netting.js";
 import type { NetResult, RoundProposal, SignedIou } from "./types.js";
 
 /**
- * v1 manifest commitment: keccak256 of the sorted consumed-IOU-id list.
- * (bytes32 on-chain either way — v2 can swap in a merkle root for inclusion
- * proofs without touching the contract.)
+ * v2 manifest commitment: the sorted-leaf merkle root over the consumed-IOU-id
+ * list (construction spec: src/merkle.ts numbered rules / docs/PROTOCOL.md).
+ * Same bytes32 field and Round EIP-712 struct as v1 — only the preimage
+ * changed; the empty manifest still commits to keccak256("0x") (D-04).
  */
 export function manifestHash(sortedIds: Hex[]): Hex {
-  if (sortedIds.length === 0) return keccak256("0x");
-  return keccak256(concat(sortedIds));
+  return merkleRoot(sortedIds);
 }
 
 function roundMessage(p: {
