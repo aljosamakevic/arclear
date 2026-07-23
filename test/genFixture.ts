@@ -63,8 +63,11 @@ const proposal = buildProposal(HUB, 0n, {
 
 const consent = await signConsent(HUB, proposal, accounts[0]);
 // accounts[0] IS the debtor (participants[0]) — staged for on-chain hashIou
-// digest + recovery parity in plan 02-04.
-const signedIou = await signIou(HUB, iou, accounts[0]);
+// digest + recovery parity in plan 02-04. Fixed `now` = expiry − L keeps
+// generation deterministic under the L-convention check (boundary-safe: <=).
+const signedIou = await signIou(HUB, iou, accounts[0], undefined, {
+  now: 4_102_444_800n - 86_400n,
+});
 
 const fixture = {
   hub: HUB,
