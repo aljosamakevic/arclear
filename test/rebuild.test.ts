@@ -174,11 +174,12 @@ function iou(debtor: Address, creditor: Address, amount: bigint, nonce = 1n): Io
 
 /** Four real signed IOUs among alice/bob/carol; excluding carol changes every delta. */
 async function threeMemberEconomy(): Promise<SignedIou[]> {
+  const at = { now: NOW };
   return [
-    await signIou(HUB, iou(alice.address, bob.address, 100n), alice),
-    await signIou(HUB, iou(bob.address, alice.address, 30n), bob),
-    await signIou(HUB, iou(carol.address, alice.address, 50n), carol),
-    await signIou(HUB, iou(bob.address, carol.address, 20n), bob),
+    await signIou(HUB, iou(alice.address, bob.address, 100n), alice, undefined, at),
+    await signIou(HUB, iou(bob.address, alice.address, 30n), bob, undefined, at),
+    await signIou(HUB, iou(carol.address, alice.address, 50n), carol, undefined, at),
+    await signIou(HUB, iou(bob.address, carol.address, 20n), bob, undefined, at),
   ];
 }
 

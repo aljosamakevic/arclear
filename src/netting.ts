@@ -8,7 +8,9 @@ import type { NetResult, SignedIou } from "./types.js";
  * Rules (spec: docs/PROTOCOL.md — third parties must implement identically):
  * 1. Dedup by IOU id (identical ids are the same obligation).
  * 2. Drop expired: `expiry <= now + safetyWindow`.
- * 3. Drop already-settled ids (present in `settledIds`).
+ * 3. Drop already-settled ids (present in `settledIds`) and redeemed ids
+ *    (present in `redeemedIds` — D-14: a redeemed IOU is extinguished on-chain
+ *    and must never re-enter netting).
  * 4. Sum flows per participant: debtor -amount, creditor +amount.
  * 5. Participants sorted ascending by address (lowercase hex order).
  * 6. A participant stays in the round (with delta possibly 0) iff at least one
@@ -24,10 +26,12 @@ export function net(
     now: bigint;
     safetyWindowSeconds?: bigint;
     settledIds?: ReadonlySet<Hex>;
+    redeemedIds?: ReadonlySet<Hex>;
   },
 ): NetResult {
   const safety = opts.safetyWindowSeconds ?? 60n;
   const settled = opts.settledIds ?? new Set<Hex>();
+  const redeemed = opts.redeemedIds ?? new Set<Hex>();
 
   const seen = new Set<Hex>();
   const positions = new Map<string, bigint>(); // lowercase address -> delta
@@ -40,7 +44,8 @@ export function net(
     if (seen.has(id)) continue; // rule 1
     seen.add(id);
     if (s.iou.expiry <= opts.now + safety) continue; // rule 2
-    if (settled.has(id) || settled.has(s.id)) continue; // rule 3
+    if (settled.has(id) || settled.has(s.id)) continue; // rule 3 (settled)
+    if (redeemed.has(id) || redeemed.has(s.id)) continue; // rule 3 (redeemed, D-14)
 
     const debtor = s.iou.debtor.toLowerCase();
     const creditor = s.iou.creditor.toLowerCase();

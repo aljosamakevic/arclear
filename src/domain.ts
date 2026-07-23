@@ -28,6 +28,13 @@ export const EURC: Address = "0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a";
 export const MIN_MAX_FEE_PER_GAS = 25_000_000_000n; // 25 gwei
 
 /**
+ * D-15 signing convention bound L: refuse to sign IOUs with expiry > now + L.
+ * UNCALIBRATED — mirrors the hub's MAX_IOU_LIFETIME immutable deploy default
+ * (86,400s); Phase 3 owns the real calibration.
+ */
+export const DEFAULT_MAX_IOU_LIFETIME_SECONDS = 86_400n;
+
+/**
  * Shared EIP-712 domain for IOUs and Rounds. Binding `verifyingContract` to
  * the hub binds the token too (one hub per ERC-20), and `chainId` kills
  * cross-chain replay. Defaults to Arc Testnet; pass the live chain id when

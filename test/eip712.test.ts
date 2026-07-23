@@ -4,7 +4,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { privateKeyToAccount } from "viem/accounts";
 import type { Address, Hex } from "viem";
-import { iouId, signIou, verifyIou } from "../src/iou.js";
+import { checkIouLifetime, iouId, signIou, verifyIou } from "../src/iou.js";
 import {
   buildProposal,
   manifestHash,
@@ -35,14 +35,16 @@ function iou(debtor: Address, creditor: Address, amount: bigint, nonce = 1n): Io
 
 describe("EIP-712 sign/verify", () => {
   it("IOU roundtrip: debtor signs, anyone verifies", async () => {
-    const signed = await signIou(HUB, iou(alice.address, bob.address, 42n), alice);
+    const signed = await signIou(HUB, iou(alice.address, bob.address, 42n), alice, undefined, {
+      now: NOW,
+    });
     expect(await verifyIou(HUB, signed)).toBe(true);
     expect(signed.id).toBe(iouId(HUB, signed.iou));
   });
 
   it("rejects a signer that is not the debtor", async () => {
     await expect(
-      signIou(HUB, iou(alice.address, bob.address, 42n), bob),
+      signIou(HUB, iou(alice.address, bob.address, 42n), bob, undefined, { now: NOW }),
     ).rejects.toThrow(/not debtor/);
   });
 
@@ -61,8 +63,12 @@ describe("EIP-712 sign/verify", () => {
   });
 
   it("consent roundtrip and proposal verification", async () => {
-    const a = await signIou(HUB, iou(alice.address, bob.address, 100n), alice);
-    const b = await signIou(HUB, iou(bob.address, alice.address, 30n, 1n), bob);
+    const a = await signIou(HUB, iou(alice.address, bob.address, 100n), alice, undefined, {
+      now: NOW,
+    });
+    const b = await signIou(HUB, iou(bob.address, alice.address, 30n, 1n), bob, undefined, {
+      now: NOW,
+    });
     const result = net([a, b], { now: NOW });
     const proposal = buildProposal(HUB, 0n, result);
 
@@ -81,7 +87,9 @@ describe("EIP-712 sign/verify", () => {
   });
 
   it("verifyProposal rejects a tampered delta", async () => {
-    const a = await signIou(HUB, iou(alice.address, bob.address, 100n), alice);
+    const a = await signIou(HUB, iou(alice.address, bob.address, 100n), alice, undefined, {
+      now: NOW,
+    });
     const result = net([a], { now: NOW });
     const proposal = buildProposal(HUB, 0n, result);
     const tampered = {
@@ -91,6 +99,36 @@ describe("EIP-712 sign/verify", () => {
     const check = verifyProposal(HUB, tampered, [a], alice.address, { now: NOW });
     expect(check.ok).toBe(false);
     expect(check.reason).toMatch(/delta mismatch|digest/);
+  });
+
+  it("L-convention D-15: refuses expiry > now + L, signs the <= boundary", async () => {
+    const bad = { ...iou(alice.address, bob.address, 42n), expiry: NOW + 86_401n };
+    await expect(
+      signIou(HUB, bad, alice, undefined, { now: NOW }),
+    ).rejects.toThrow(/exceeds now/);
+    // checkIouLifetime never throws — it reports.
+    const check = checkIouLifetime(bad, { now: NOW });
+    expect(check.ok).toBe(false);
+    expect(check.reason).toMatch(/exceeds now/);
+    // Boundary: expiry == now + L is signable (<= convention).
+    const edge = { ...iou(alice.address, bob.address, 42n), expiry: NOW + 86_400n };
+    await expect(signIou(HUB, edge, alice, undefined, { now: NOW })).resolves.toBeDefined();
+    expect(checkIouLifetime(edge, { now: NOW }).ok).toBe(true);
+    // Custom L override tightens/loosens the same rule.
+    expect(checkIouLifetime(edge, { now: NOW, maxIouLifetimeSeconds: 3_600n }).ok).toBe(false);
+  });
+
+  it("net() excludes redeemedIds exactly like settledIds (D-14)", async () => {
+    const a = await signIou(HUB, iou(alice.address, bob.address, 100n), alice, undefined, {
+      now: NOW,
+    });
+    const b = await signIou(HUB, iou(bob.address, alice.address, 30n, 1n), bob, undefined, {
+      now: NOW,
+    });
+    const filtered = net([a, b], { now: NOW, redeemedIds: new Set([a.id]) });
+    expect(filtered.consumedIds).toEqual([b.id.toLowerCase()]);
+    const unfiltered = net([a, b], { now: NOW });
+    expect(unfiltered.consumedIds).toHaveLength(2);
   });
 
   it("matches the shared fixture consumed by the Foundry parity test", () => {
