@@ -97,7 +97,8 @@ export async function setupAnvil(): Promise<DemoEnv> {
   const hubTx = await wallet.deployContract({
     abi: clearingHubV2Abi,
     bytecode: clearingHubV2Bytecode,
-    args: [token],
+    // K/RING/MAX_IOU_LIFETIME: the same UNCALIBRATED defaults as DeployV2.s.sol.
+    args: [token, 3n, 16n, 86_400n],
     account: deployer,
     chain,
   });
