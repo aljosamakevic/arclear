@@ -88,7 +88,13 @@ export function rebuildProposal(
   roundNonce: bigint,
   openIous: SignedIou[],
   excluded: Address[],
-  opts: { now: bigint; safetyWindowSeconds?: bigint; settledIds?: ReadonlySet<Hex>; chainId?: number },
+  opts: {
+    now: bigint;
+    safetyWindowSeconds?: bigint;
+    settledIds?: ReadonlySet<Hex>;
+    redeemedIds?: ReadonlySet<Hex>;
+    chainId?: number;
+  },
 ): { proposal: RoundProposal; result: NetResult } {
   const result = net(filterExcluded(openIous, excluded), opts);
   return { proposal: buildProposal(hub, roundNonce, result, opts.chainId), result };
@@ -119,6 +125,9 @@ export function verifyProposal(
     now: bigint;
     safetyWindowSeconds?: bigint;
     settledIds?: ReadonlySet<Hex>;
+    /** Ids extinguished on-chain via redeemIOU — excluded from the local
+     * recomputation exactly like settledIds (D-14). */
+    redeemedIds?: ReadonlySet<Hex>;
     excluded?: Address[];
     chainId?: number;
     /** Refuse unless proposal.roundNonce matches the caller's own chain read. */
