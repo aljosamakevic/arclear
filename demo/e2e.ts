@@ -4,18 +4,22 @@
  * Then the D-15 canonical liveness scenario: stall a member → the round
  * settles without them (pass 2) → their IOUs settle cleanly next round →
  * nothing ever settles twice (CONS-04).
+ * Then the D-17 redemption scenario: a debtor goes dark past K EXECUTED
+ * rounds → the creditor reconstructs non-inclusion proofs from calldata and
+ * redeems on-chain → debtor debited to the base unit → the redeemed id is
+ * structurally dead for netting forever (MERK-03/MERK-04).
  *
  *   npm run e2e:anvil     (local, spawns anvil, deploys everything)
  *   npm run e2e:testnet   (Arc Testnet, needs .env — see README)
  */
 import "./env.js";
-import { keccak256, toHex, type Hex } from "viem";
+import { createWalletClient, http, keccak256, toHex, type Hex } from "viem";
 import { setup } from "./setup.js";
 import { simulateTraffic } from "./simulate.js";
 import { Coordinator } from "./coordinator.js";
 import { printReport, fmt } from "./report.js";
 import { signIou } from "../src/iou.js";
-import { clearingHubV2Bytecode } from "../src/abi/ClearingHubV2.js";
+import { clearingHubV2Abi, clearingHubV2Bytecode } from "../src/abi/ClearingHubV2.js";
 import { clearingHubBytecode } from "../src/abi/ClearingHub.js";
 
 const mode = process.argv.includes("--anvil") ? "anvil" : "testnet";
@@ -225,13 +229,151 @@ check(
 await assertDeltas(beforeN1, roundN1.round.deltas, "round n+1");
 printReport(roundN1.round, env.explorerTx);
 
+// ── D-17 redemption scenario (MERK-03/MERK-04) ───────────────────────────────
+// Dark debtor → creditor self-serve recovery from calldata-reconstructed
+// proofs → permanent netting exclusion. Eligibility is asserted from the
+// ON-CHAIN condition (lastRound/roundNonce reads over EXECUTED rounds) —
+// coordinator counters are early warning only and never consulted (D-09).
+console.log("[e2e] redemption scenario: dark debtor → creditor recovers from chain data …");
+const redemptionCreditor = env.personas[3]; // Trader
+const redemptionAmount = 300_000n / divisor; // fixed base units
+const redemptionPairKey = `${staller.account.address}->${redemptionCreditor.account.address}`;
+const redemptionNonce = (nonces.get(redemptionPairKey) ?? 0n) + 1n;
+nonces.set(redemptionPairKey, redemptionNonce);
+const redemptionIou = await signIou(
+  env.hub,
+  {
+    debtor: staller.account.address,
+    creditor: redemptionCreditor.account.address,
+    amount: redemptionAmount,
+    nonce: redemptionNonce,
+    // L-convention boundary: expiry = now + L is the latest an honest signer
+    // may pick, keeping every possibly-consuming round inside [expiry-L, expiry).
+    expiry: now() + 86_400n,
+    ref: keccak256(toHex(`redemption ${staller.name}->${redemptionCreditor.name} #${redemptionNonce}`)) as Hex,
+  },
+  staller.account,
+  env.chain.id,
+);
+const redemptionId = redemptionIou.id.toLowerCase() as Hex;
+coordinator.addIous([redemptionIou]);
+
+// The debtor goes dark. K executed rounds must settle among the OTHER
+// personas — an aborted round advances no on-chain clock, so each round below
+// must genuinely execute (Pitfall 4).
+staller.stalled = true;
+const K: bigint = await env.pub.readContract({
+  address: env.hub,
+  abi: clearingHubV2Abi,
+  functionName: "K",
+});
+const othersOnly = env.personas.filter((p) => p !== staller);
+for (let i = 1n; i <= K; i++) {
+  const staleTraffic = await simulateTraffic(env.hub, othersOnly, 30, {
+    now: now(),
+    chainId: env.chain.id,
+    amountDivisor: divisor,
+    startNonce: nonces,
+  });
+  coordinator.addIous(staleTraffic);
+  const r = await coordinator.runRound(now(), 2_000);
+  check(r.outcome === "settled", `staleness round ${i}/${K} executed without ${staller.name}`);
+  if (r.outcome !== "settled") {
+    console.error(`[e2e] FAIL — staleness round ${i} outcome=${r.outcome}`);
+    env.anvil?.kill();
+    process.exit(1);
+  }
+}
+
+// On-chain staleness precondition, exactly as redeemIOU checks it:
+// roundNonce >= lastRound[debtor] + K (lastRound is 1-based; 0 = never).
+const nonceBeforeRedeem = await env.hubClient.roundNonce();
+const lastRoundStaller = await env.hubClient.lastRound(staller.account.address);
+check(
+  nonceBeforeRedeem >= lastRoundStaller + K,
+  `on-chain staleness holds: roundNonce ${nonceBeforeRedeem} >= lastRound ${lastRoundStaller} + K ${K}`,
+);
+
+// Creditor path: reconstruct every buffered manifest from executeRound
+// calldata (never a coordinator endpoint) and submit redeemIOU themselves.
+const debtorBefore = await env.hubClient.collateral(staller.account.address);
+const creditorBefore = await env.hubClient.collateral(redemptionCreditor.account.address);
+const proofs = await env.hubClient.prepareRedemptionProofs(redemptionIou.id);
+const creditorWallet = createWalletClient({
+  account: redemptionCreditor.account,
+  chain: env.chain,
+  transport: http(env.chain.rpcUrls.default.http[0]),
+});
+const redeemTx = await env.hubClient.redeemIOU(
+  creditorWallet,
+  redemptionIou.iou,
+  redemptionIou.signature,
+  proofs,
+);
+const redeemReceipt = await env.pub.waitForTransactionReceipt({ hash: redeemTx });
+check(redeemReceipt.status === "success", `redeemIOU mined successfully (${redeemTx})`);
+
+const debtorAfter = await env.hubClient.collateral(staller.account.address);
+const creditorAfter = await env.hubClient.collateral(redemptionCreditor.account.address);
+check(
+  debtorBefore - debtorAfter === redemptionAmount,
+  `${staller.name} collateral debited by exactly ${redemptionAmount} base units (${fmt(debtorBefore)} → ${fmt(debtorAfter)})`,
+);
+check(
+  creditorAfter - creditorBefore === redemptionAmount,
+  `${redemptionCreditor.name} collateral credited by exactly ${redemptionAmount} base units (${fmt(creditorBefore)} → ${fmt(creditorAfter)})`,
+);
+check(await env.hubClient.redeemed(redemptionIou.id), "redeemed(id) is true on-chain");
+
+// Exclusivity tail (MERK-04/D-17): the debtor comes back, traffic touches
+// them again, and the redeemed id must never appear in any consumed manifest —
+// the coordinator's redeemedIds reconciliation drops it from netting forever.
+staller.stalled = false;
+const tailTraffic = await simulateTraffic(env.hub, env.personas, 40, {
+  now: now(),
+  chainId: env.chain.id,
+  amountDivisor: divisor,
+  startNonce: nonces,
+});
+coordinator.addIous(tailTraffic);
+// Deterministic paper touching the returned debtor in both directions.
+coordinator.addIous([
+  await explicitIou(2, 4, 200_000n), // staller owes Auditor
+  await explicitIou(0, 2, 150_000n), // Crawler owes staller
+]);
+
+const settledBeforeTail = new Set(coordinator.settledIds);
+const beforeTail = await snapshot();
+const tailRound = await coordinator.runRound(now(), 2_000);
+check(tailRound.outcome === "settled", `tail round settled with ${staller.name} participating again`);
+if (tailRound.outcome !== "settled") {
+  console.error(`[e2e] FAIL — tail round outcome=${tailRound.outcome}`);
+  env.anvil?.kill();
+  process.exit(1);
+}
+check(stallerLower in tailRound.round.deltas, `${staller.name} participated in the tail round`);
+const consumedTail = new Set(
+  [...coordinator.settledIds].filter((id) => !settledBeforeTail.has(id)).map((id) => id.toLowerCase()),
+);
+check(!consumedTail.has(redemptionId), "redeemed id absent from the tail round's consumed manifest");
+// Union across ALL rounds ever settled: settledIds is exactly that union, and
+// the redeemed id must not be in it — it can never settle (disjointness idiom).
+check(
+  !coordinator.settledIds.has(redemptionId),
+  "redeemed id absent from the union of every consumed manifest — it can never settle (MERK-04/D-17)",
+);
+await assertDeltas(beforeTail, tailRound.round.deltas, "tail round");
+printReport(tailRound.round, env.explorerTx);
+
 // ── Verdict ──────────────────────────────────────────────────────────────────
 if (failures > 0) {
   console.error(`[e2e] FAIL — ${failures} assertion(s) failed`);
   env.anvil?.kill();
   process.exit(1);
 }
-console.log("[e2e] PASS — baseline settlement + liveness scenario (stall → exclude → re-settle → never twice)");
+console.log(
+  "[e2e] PASS — baseline settlement + liveness scenario (stall → exclude → re-settle → never twice) + redemption scenario (dark debtor → self-serve recovery → never nets again)",
+);
 
 env.anvil?.kill();
 process.exit(0);
