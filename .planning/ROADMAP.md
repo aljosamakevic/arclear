@@ -89,7 +89,7 @@ Plans:
 
 **Wave 3**
 
-- [ ] 02-04-PLAN.md — ClearingHubV2 extension: consumedIds executeRound, rootRing, lastRound, hashIou, redeemIOU; DeployV2 + parity constructor fix (wave 3)
+- [x] 02-04-PLAN.md — ClearingHubV2 extension: consumedIds executeRound, rootRing, lastRound, hashIou, redeemIOU; DeployV2 + parity constructor fix (wave 3)
 
 **Wave 4**
 
@@ -200,7 +200,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8. Ex
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Threshold Consent | 5/5 | Complete    | 2026-07-22 |
-| 2. Merkle Manifests & IOU Redemption | 3/8 | In Progress|  |
+| 2. Merkle Manifests & IOU Redemption | 4/8 | In Progress|  |
 | 3. Calibration Checkpoint | 0/TBD | Not started | - |
 | 4. Novation — ArclearCCP.sol | 0/TBD | Not started | - |
 | 5. Margin | 0/TBD | Not started | - |
