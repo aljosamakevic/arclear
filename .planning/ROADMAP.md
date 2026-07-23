@@ -93,7 +93,7 @@ Plans:
 
 **Wave 4**
 
-- [ ] 02-05-PLAN.md — RoundBuilderV2 harness, redeemIOU revert matrix, bidirectional exclusivity, fuzz, measured gas (wave 4)
+- [x] 02-05-PLAN.md — RoundBuilderV2 harness, redeemIOU revert matrix, bidirectional exclusivity, fuzz, measured gas (wave 4)
 
 **Wave 5**
 
@@ -200,7 +200,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8. Ex
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Threshold Consent | 5/5 | Complete    | 2026-07-22 |
-| 2. Merkle Manifests & IOU Redemption | 4/8 | In Progress|  |
+| 2. Merkle Manifests & IOU Redemption | 5/8 | In Progress|  |
 | 3. Calibration Checkpoint | 0/TBD | Not started | - |
 | 4. Novation — ArclearCCP.sol | 0/TBD | Not started | - |
 | 5. Margin | 0/TBD | Not started | - |
