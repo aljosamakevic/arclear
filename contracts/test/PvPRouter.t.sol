@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
 
+import {console2} from "forge-std/Test.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 
 import {PvPRoundBuilder} from "./utils/PvPRoundBuilder.sol";
@@ -523,5 +524,84 @@ contract PvPRouterTest is PvPRoundBuilder {
         // nonce is consumed, so the atomic path reverts WrongRoundNonce.
         vm.expectRevert(abi.encodeWithSelector(ClearingHubV2.WrongRoundNonce.selector, nU + 1, nU));
         _submit(b);
+    }
+
+    // ------------------------------------------------------------------- gas
+    // Fresh-state, all-cold worst-case executePvP; measured via gasleft()
+    // deltas around the router call — same methodology as the plan 02-05
+    // executeRound points. These measurements source the client formula's
+    // PVP_ROUTER_GAS_BASE / PVP_GAS_PER_UNION_SIG constants (src/client.ts).
+
+    /// Small point: the canonical overlapping bundle (n=3 per leg, union=4)
+    /// with 10-id manifests per leg.
+    function test_gas_executePvP_small() public {
+        _fundAndDeposit(hubUSDC, usdc, actors[0], 10e6);
+        _fundAndDeposit(hubEURC, eurc, actors[1], 10e6);
+
+        address[] memory pU = new address[](3);
+        (pU[0], pU[1], pU[2]) = (actors[0], actors[1], actors[2]);
+        int256[] memory dU = new int256[](3);
+        (dU[0], dU[1], dU[2]) = (int256(-3e6), int256(1e6), int256(2e6));
+        address[] memory pE = new address[](3);
+        (pE[0], pE[1], pE[2]) = (actors[1], actors[2], actors[3]);
+        int256[] memory dE = new int256[](3);
+        (dE[0], dE[1], dE[2]) = (int256(-3e6), int256(1e6), int256(2e6));
+
+        PvPBundle memory b = _bundle(
+            hubUSDC.roundNonce(),
+            pU,
+            dU,
+            _manifest(10, "gas-small-usdc"),
+            hubEURC.roundNonce(),
+            pE,
+            dE,
+            _manifest(10, "gas-small-eurc"),
+            989_589,
+            1_000_000
+        );
+
+        uint256 g0 = gasleft();
+        _submit(b);
+        uint256 used = g0 - gasleft();
+        console2.log("gas_executePvP n=3+3 m=10+10 union=4:", used);
+        assertEq(hubUSDC.roundNonce(), 1, "USDC leg must have executed");
+        assertEq(hubEURC.roundNonce(), 1, "EURC leg must have executed");
+    }
+
+    /// Demo-scale point mirroring the Phase 2 measured executeRound points:
+    /// n=5 per leg (all actors on both hubs, union=5), m=105 per leg.
+    function test_gas_executePvP_demoScale() public {
+        _fundAndDeposit(hubUSDC, usdc, actors[0], 10e6);
+        _fundAndDeposit(hubUSDC, usdc, actors[3], 10e6);
+        _fundAndDeposit(hubEURC, eurc, actors[0], 10e6);
+        _fundAndDeposit(hubEURC, eurc, actors[3], 10e6);
+
+        address[] memory p = new address[](5);
+        int256[] memory d = new int256[](5);
+        for (uint256 i; i < 5; ++i) {
+            p[i] = actors[i];
+        }
+        (d[0], d[1], d[2], d[3], d[4]) =
+            (int256(-3e6), int256(1e6), int256(2e6), int256(-1e6), int256(1e6));
+
+        PvPBundle memory b = _bundle(
+            hubUSDC.roundNonce(),
+            p,
+            d,
+            _manifest(105, "gas-demo-usdc"),
+            hubEURC.roundNonce(),
+            p,
+            d,
+            _manifest(105, "gas-demo-eurc"),
+            989_589,
+            1_000_000
+        );
+
+        uint256 g0 = gasleft();
+        _submit(b);
+        uint256 used = g0 - gasleft();
+        console2.log("gas_executePvP n=5+5 m=105+105 union=5:", used);
+        assertEq(hubUSDC.roundNonce(), 1, "USDC leg must have executed");
+        assertEq(hubEURC.roundNonce(), 1, "EURC leg must have executed");
     }
 }

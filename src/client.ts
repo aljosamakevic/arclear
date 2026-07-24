@@ -12,8 +12,10 @@ import type { Account } from "viem/accounts";
 import { arcTestnet, MIN_MAX_FEE_PER_GAS } from "./domain.js";
 import { clearingHubAbi } from "./abi/ClearingHub.js";
 import { clearingHubV2Abi } from "./abi/ClearingHubV2.js";
+import { pvpRouterAbi } from "./abi/PvPRouter.js";
 import { nonInclusionProof, type InclusionProof, type NonInclusionProof } from "./merkle.js";
-import type { Iou, RoundProposal } from "./types.js";
+import { unionParticipants } from "./pvp.js";
+import type { Iou, PvPProposal, RoundProposal } from "./types.js";
 
 export { clearingHubAbi };
 
@@ -35,6 +37,22 @@ export const EXECUTE_ROUND_GAS_PER_ID = 6_000n;
  * ≈ +40k total).
  */
 export const REDEEM_IOU_GAS = 500_000n;
+
+/**
+ * executePvP gas formula coefficients — from forge-measured gasleft() deltas
+ * (plan 04-04, 2026-07-24, fresh-state worst case): n=3+3/m=10+10/union=4 →
+ * 563,814; n=5+5/m=105+105/union=5 (demo scale) → 1,734,897. The two legs
+ * reuse the plan 02-05 executeRound coefficients; these constants cover the
+ * router's own overhead (leg calldata, 2x hashRound recomputation, union
+ * merge + ECDSA recovers). Formula at the demo-scale point:
+ * 350,000 + 2*300,000 + 40,000*10 + 6,000*210 + 15,000*5 = 2,685,000
+ * = 1.55x measured 1,734,897 (small point: 1,370,000 = 2.43x measured
+ * 563,814) — >=1.5x margin at every measured point. Explicit gas is
+ * mandatory on Arc: USDC is the gas token, so estimation reserves the whole
+ * balance.
+ */
+export const PVP_ROUTER_GAS_BASE = 350_000n;
+export const PVP_GAS_PER_UNION_SIG = 15_000n;
 
 export function publicClient(rpcUrl?: string): PublicClient {
   return createPublicClient({ chain: arcTestnet, transport: http(rpcUrl) });
@@ -278,6 +296,110 @@ export class HubClient {
       account: wallet.account!,
       maxFeePerGas: MIN_MAX_FEE_PER_GAS,
       gas: REDEEM_IOU_GAS,
+    });
+  }
+}
+
+/** One leg as the router's executePvP consumes it: the embedded RoundProposal
+ *  fields plus its collected consent signatures, ABI-tuple-shaped. */
+function toAbiLeg(leg: RoundProposal, signatures: Hex[]) {
+  return {
+    nonce: leg.roundNonce,
+    participants: leg.participants,
+    deltas: leg.deltas,
+    consumedIds: leg.consumedIds,
+    signatures,
+  };
+}
+
+/** Typed wrapper around one PvPRouter deployment: hub-pair reads, PvPRound
+ *  digest parity checks, and formula-gas atomic PvP submission. */
+export class PvPRouterClient {
+  private readonly pub: PublicClient;
+
+  constructor(
+    readonly router: Address,
+    rpcUrl?: string,
+  ) {
+    this.pub = publicClient(rpcUrl);
+  }
+
+  /** The immutable USDC-side hub the router was deployed against. */
+  hubUSDC(): Promise<Address> {
+    return this.pub.readContract({
+      address: this.router,
+      abi: pvpRouterAbi,
+      functionName: "hubUSDC",
+    });
+  }
+
+  /** The immutable EURC-side hub the router was deployed against. */
+  hubEURC(): Promise<Address> {
+    return this.pub.readContract({
+      address: this.router,
+      abi: pvpRouterAbi,
+      functionName: "hubEURC",
+    });
+  }
+
+  /** On-chain PvPRound digest — used to assert parity with the SDK's pvpDigest. */
+  hashPvPRound(
+    usdcLegDigest: Hex,
+    eurcLegDigest: Hex,
+    fxNumerator: bigint,
+    fxDenominator: bigint,
+  ): Promise<Hex> {
+    return this.pub.readContract({
+      address: this.router,
+      abi: pvpRouterAbi,
+      functionName: "hashPvPRound",
+      args: [usdcLegDigest, eurcLegDigest, fxNumerator, fxDenominator],
+    });
+  }
+
+  /**
+   * Submit a fully consented PvP bundle atomically. Permissionless — any
+   * relayer works. Gas is the measured formula (never estimation — Arc's
+   * gas token is USDC, so estimation reserves the whole balance): router
+   * base + both legs' executeRound formula terms + per-union-signature cost,
+   * with the signed leg digests passed explicitly so the router binds the
+   * calldata legs to exactly what the union consented to.
+   */
+  async executePvP(
+    wallet: WalletClient,
+    proposal: PvPProposal,
+    legSignatures: { usdc: Hex[]; eurc: Hex[] },
+    pvpSignatures: Hex[],
+  ): Promise<Hex> {
+    const nUnion = unionParticipants(
+      proposal.usdcLeg.participants,
+      proposal.eurcLeg.participants,
+    ).length;
+    const gas =
+      PVP_ROUTER_GAS_BASE +
+      2n * EXECUTE_ROUND_GAS_BASE +
+      EXECUTE_ROUND_GAS_PER_PARTICIPANT *
+        BigInt(proposal.usdcLeg.participants.length + proposal.eurcLeg.participants.length) +
+      EXECUTE_ROUND_GAS_PER_ID *
+        BigInt(proposal.usdcLeg.consumedIds.length + proposal.eurcLeg.consumedIds.length) +
+      PVP_GAS_PER_UNION_SIG * BigInt(nUnion);
+    return wallet.writeContract({
+      address: this.router,
+      abi: pvpRouterAbi,
+      functionName: "executePvP",
+      args: [
+        toAbiLeg(proposal.usdcLeg, legSignatures.usdc),
+        toAbiLeg(proposal.eurcLeg, legSignatures.eurc),
+        proposal.usdcLeg.digest,
+        proposal.eurcLeg.digest,
+        proposal.fxNumerator,
+        proposal.fxDenominator,
+        pvpSignatures,
+      ],
+      chain: wallet.chain,
+      account: wallet.account!,
+      maxFeePerGas: MIN_MAX_FEE_PER_GAS,
+      gas,
     });
   }
 }
