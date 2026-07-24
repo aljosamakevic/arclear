@@ -164,7 +164,7 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3)*
 
-- [ ] 04-06-PLAN.md — e2e both-or-neither on anvil (positive with FX-exact balances + gasUsed; negatives: aborted bundle + forced revert) + dashboard PvP badge (wave 4)
+- [x] 04-06-PLAN.md — e2e both-or-neither on anvil (positive with FX-exact balances + gasUsed; negatives: aborted bundle + forced revert) + dashboard PvP badge (wave 4)
 
 **Wave 5** *(blocked on Wave 4)*
 
@@ -181,4 +181,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4.
 | 1. Threshold Consent | 5/5 | Complete    | 2026-07-22 |
 | 2. Merkle Manifests & IOU Redemption | 8/8 | Complete    | 2026-07-24 |
 | 3. Calibration Checkpoint | 3/3 | Complete    | 2026-07-24 |
-| 4. Cross-Currency PvP Rounds | 5/7 | In Progress|  |
+| 4. Cross-Currency PvP Rounds | 6/7 | In Progress|  |
