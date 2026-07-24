@@ -128,6 +128,12 @@ export function roundFlowBatch(
  */
 export function simulateThresholdHistory(params: ThresholdParams): ThresholdHistory {
   const { n, rounds, seed, uptime } = params;
+  // A schedule shorter than rounds would make uptime[r] undefined, every
+  // `uniform < undefined` false, and every affected round a plausible-looking
+  // "aborted" — silently wrong data, no throw (WR-05). Fail loudly instead.
+  if (Array.isArray(uptime) && uptime.length < rounds) {
+    throw new Error(`uptime schedule has ${uptime.length} entries for ${rounds} rounds`);
+  }
   const uniforms = availabilityUniforms(seed, rounds, n);
   const members: string[] = [];
   for (let i = 0; i < n; i++) members.push(addr(i).toLowerCase());
