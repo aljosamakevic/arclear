@@ -22,6 +22,18 @@ deploy.
 *(real output of `npm run e2e:anvil`; parameters and honest caveats in
 [Measured compression](#measured-compression-when-is-netting-worth-it) below)*
 
+## ▶ Try it live
+
+**[arclear-demo.fly.dev](https://arclear-demo.fly.dev)** — the live dashboard.
+Click **Simulate traffic**, then **Run netting round**, and watch ~100 signed
+IOUs collapse into a single settlement.
+
+This is a **sandbox**: it runs against an in-container [anvil](https://book.getfoundry.sh/anvil/)
+chain (not Arc Testnet), so there are no real funds, no keys, and it resets on
+restart — press every button freely. The dashboard and protocol code are
+identical to what settles on testnet; only the chain underneath differs. The
+live testnet contracts are listed under [Deployed hubs](#deployed-hubs-arc-testnet-chain-5042002) below.
+
 ## Why this exists
 
 Circle Gateway's x402 nanopayments compress **your outbound transaction count
@@ -161,7 +173,8 @@ npm test                                               # 120 TypeScript tests
 npm run e2e:anvil                                      # full flow, locally, ~20s
 ```
 
-Live dashboard (spawns anvil, deploys, funds five agents):
+Live dashboard, locally (spawns anvil, deploys, funds five agents — the same
+thing [arclear-demo.fly.dev](https://arclear-demo.fly.dev) runs):
 
 ```bash
 npm run demo -- --anvil
@@ -198,9 +211,9 @@ Real settlement on the v1 USDC hub — 105 IOUs, $5.52 gross, $0.43 settled,
 
 **Arclear Net v2 — current hubs** (`ClearingHubV2` — threshold consent +
 merkle manifests + on-chain IOU redemption via `redeemIOU`; redemption
-params K=3 / RING=16 / L=86,400 s are **uncalibrated** demo-scale defaults,
-calibration deferred to the Phase 3 checkpoint; set these as `HUB_V2_USDC` /
-`HUB_V2_EURC` in `.env`, v1 keys stay):
+params K=3 / RING=16 / L=86,400 s are **uncalibrated** demo-scale defaults
+(the sweep findings are in [CALIBRATION.md](docs/CALIBRATION.md)); set these
+as `HUB_V2_USDC` / `HUB_V2_EURC` in `.env`, v1 keys stay):
 
 | token | hub | status |
 | ----- | --- | ------ |
