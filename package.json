@@ -14,7 +14,8 @@
     "e2e:testnet": "tsx demo/e2e.ts",
     "demo": "tsx demo/server.ts",
     "report": "tsx demo/report.ts",
-    "sweep": "tsx demo/sweep.ts"
+    "sweep": "tsx demo/sweep.ts",
+    "sweep:threshold": "tsx demo/thresholdSweep.ts"
   },
   "dependencies": {
     "viem": "^2.21.0"
