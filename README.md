@@ -145,6 +145,10 @@ Roles](docs/PROTOCOL.md#roles); more vocabulary in
 
 ## Quickstart
 
+**Integrating the SDK into your own project?** Start with the
+[integrator quickstart](docs/QUICKSTART.md) — live hub addresses, the full
+sign → net → consent → settle flow in runnable code, ~15 minutes.
+
 ```bash
 git clone <this repo> && cd arclear
 npm install
