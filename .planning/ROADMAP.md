@@ -150,8 +150,8 @@ Note: The original DECISION GATE was resolved by user decision on 2026-07-24 (sk
 Plans:
 **Wave 1** *(parallel)*
 
-- [ ] 04-01-PLAN.md — SDK PvP consent layer: PVP_TYPES/pvpDomain, PvPProposal, pvpDigest/sign/verify, unionParticipants, rateConsistent, verifyPvPProposal + vitest suite (wave 1)
-- [ ] 04-02-PLAN.md — PvPRouter.sol: stateless atomic router (immutable hub pair, union-sig verification, plain-call leg execution) + smoke tests (wave 1)
+- [x] 04-01-PLAN.md — SDK PvP consent layer: PVP_TYPES/pvpDomain, PvPProposal, pvpDigest/sign/verify, unionParticipants, rateConsistent, verifyPvPProposal + vitest suite (wave 1)
+- [x] 04-02-PLAN.md — PvPRouter.sol: stateless atomic router (immutable hub pair, union-sig verification, plain-call leg execution) + smoke tests (wave 1)
 
 **Wave 2** *(parallel, blocked on Wave 1)*
 
@@ -181,4 +181,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4.
 | 1. Threshold Consent | 5/5 | Complete    | 2026-07-22 |
 | 2. Merkle Manifests & IOU Redemption | 8/8 | Complete    | 2026-07-24 |
 | 3. Calibration Checkpoint | 3/3 | Complete    | 2026-07-24 |
-| 4. Cross-Currency PvP Rounds | 0/7 | Planned | - |
+| 4. Cross-Currency PvP Rounds | 2/7 | In Progress|  |
