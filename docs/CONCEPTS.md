@@ -131,8 +131,8 @@ what that cap costs against per-member per-round consent reliability *p*:
 the practical unlock is **n ≈ 15 at 90% per-round uptime** and **n ≈ 30 at
 95%** — beyond that, abort dominates (at n=50, p=0.9 the abort rate is
 ≈ 99%: with fifty members each missing one round in ten, almost every
-attempt sees a second-pass stall). A fuller writeup (`docs/CALIBRATION.md`)
-is landing in Phase 3.
+attempt sees a second-pass stall). The full writeup — methodology,
+cross-validation, and the margin-parameter data — is in `docs/CALIBRATION.md`.
 
 So the honest prescription: below n ≈ 5, netting may save a given participant
 nothing in a bad round; above n ≈ 15–30, member reliability — not netting
