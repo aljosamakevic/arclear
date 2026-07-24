@@ -6,7 +6,12 @@ pre-posted collateral, in one atomic transaction, under **unanimous consent**
 over the executed set. v2 adds **threshold consent** — a two-pass
 exclude-and-recompute liveness path (see [Threshold
 consent](#threshold-consent-v2-exclude-and-recompute)) — without changing the
-signed structs, the digest, or the contract execution path.
+signed structs, the digest, or the contract execution path. v2 also swaps the
+manifest commitment to a **sorted-leaf merkle root** (same `bytes32` field,
+same signed Round struct — see [Manifest commitment](#manifest-commitment))
+and adds an on-chain **IOU redemption** recovery path against unresponsive
+debtors (see [IOU redemption](#iou-redemption)): bilateral credit with a
+collateralized recovery path.
 
 ## Roles
 
@@ -50,7 +55,7 @@ key and the manifest leaf.
 | roundNonce   | uint64    | must equal the hub's `roundNonce`; replay guard        |
 | participants | address[] | strictly ascending; canonical order                    |
 | deltas       | int256[]  | index-aligned net positions; sum to exactly 0          |
-| manifestHash | bytes32   | keccak256 of the sorted consumed-IOU-id list (see below) |
+| manifestHash | bytes32   | sorted-leaf merkle root of the consumed-id manifest (see below) |
 
 Every affected participant signs the **same digest** over the full arrays.
 This is what makes unanimity meaningful: a coordinator cannot show different
@@ -63,7 +68,10 @@ Third-party implementations must reproduce `src/netting.ts` exactly:
 
 1. Dedup by `iouId` (case-insensitive hex compare).
 2. Drop expired: `expiry <= now + safetyWindow` (default safety window 60 s).
-3. Drop ids already consumed by an executed round.
+3. Drop ids already consumed by an executed round, and ids nullified by
+   redemption — fold confirmed `IouRedeemed` chain logs; redeemed paper is
+   extinguished and can never net again (see [IOU
+   redemption](#iou-redemption)).
 4. Sum flows per participant: debtor −amount, creditor +amount. bigint only;
    **no division exists anywhere in the protocol**.
 5. Sort participants ascending by lowercase hex address.
@@ -71,8 +79,11 @@ Third-party implementations must reproduce `src/netting.ts` exactly:
    one of their IOUs was consumed. Consent is what extinguishes paper, so a
    zero-net participant with consumed IOUs **must sign**. Addresses with no
    consumed IOUs never appear.
-7. `consumedIds` sorted ascending; `manifestHash = keccak256(concat(ids))`,
-   or `keccak256("0x")` for the empty list.
+7. `consumedIds` sorted ascending; `manifestHash` is the sorted-leaf merkle
+   root over them per the construction rules in [Manifest
+   commitment](#manifest-commitment), or the sentinel `keccak256("0x")` for
+   the empty list. (v1 committed the plain `keccak256(concat(ids))`; the
+   field and the signed Round struct are unchanged.)
 
 Output invariant: deltas sum to 0 (property-tested with fast-check; fuzz- and
 invariant-tested in Foundry).
@@ -98,8 +109,8 @@ sequenceDiagram
     B->>B: verifyProposal()
     A->>C: consent signature
     B->>C: consent signature
-    C->>H: executeRound(nonce, participants, deltas, manifest, sigs)
-    H->>H: verify N sigs · zero-sum · coverage → apply atomically
+    C->>H: executeRound(nonce, participants, deltas, consumedIds, sigs)
+    H->>H: nullifiers · root from ids · N sigs · zero-sum → apply atomically
     H-->>A: PositionSettled(delta)
     H-->>B: PositionSettled(delta)
 ```
@@ -190,6 +201,18 @@ does it cost the victims?
   expiry: an IOU excluded in round n settles in round n+1 only if it is
   still unexpired then (netting rule 2's safety window applies at
   re-netting time). Choose expiries with rebuild latency in mind.
+- **Keep-alive censorship (v2 redemption).** The redemption staleness gate
+  is a liveness heuristic, not an authorization boundary — and participation
+  is cheap. A live debtor can ping-pong dust IOUs with an accomplice every
+  round, keeping their `lastRound` fresh while refusing to ever net one
+  specific creditor's paper: the redemption gate never opens for that
+  creditor. This is a known, accepted limitation: the censorship is fully
+  visible on-chain (the creditor's ids never appear in any manifest while
+  the debtor stays active), it costs the debtor gas every single round, and
+  punishing it is deliberately **out of protocol scope in the Net product**
+  — no per-creditor participation tracking, no clever countermeasures.
+  Credit caps remain the creditor's real defense: stop serving a debtor who
+  plays this game.
 
 The framing to carry into the risk phases that follow:
 in a payments CCP the defaulter's position is a scalar debit in a stable unit
@@ -200,25 +223,280 @@ owner over the exact executed position set.
 
 ## Settlement semantics
 
-`executeRound` checks, in order: round nonce; array lengths (≥ 2); strictly
-ascending participants (canonical order + duplicate ban in one pass); one
-valid signature per participant over the shared digest; deltas sum to zero;
-then applies deltas — a net debtor's collateral must cover their debit or the
-entire round reverts. Collateral conservation holds: netting moves balances
-between participants inside the hub; the hub's token balance is untouched.
+`executeRound(nonce, participants, deltas, consumedIds, signatures)` — the v2
+ABI carries the consumed-id list in calldata; the signed Round struct is
+unchanged, and the manifest root is derived on-chain from `consumedIds`, so
+signatures transitively bind the exact id list. It checks, in order: round
+nonce; array lengths (≥ 2); **no consumed id is nullified**
+(`NullifiedIdInManifest` — the on-chain half of redeem→cannot-net); manifest
+root derivation (`ManifestMerkle.rootOf`, rejecting unsorted or duplicate
+ids); strictly ascending participants (canonical order + duplicate ban in one
+pass); one valid signature per participant over the shared digest; deltas sum
+to zero; then applies deltas — a net debtor's collateral must cover their
+debit or the entire round reverts. After settlement the hub writes
+`lastRound[p] = nonce + 1` for **every** participant (zero-delta consenters
+included: their netted paper was consumed, participation is consent) and
+buffers the round's root in `rootRing[nonce % RING]` with its execution
+timestamp — the state the redemption gate reads. Collateral conservation
+holds: netting moves balances between participants inside the hub; the hub's
+token balance is untouched.
 
 ## Manifest commitment
 
-v1 commits `keccak256` of the sorted consumed-id list — enough to *prove
-after the fact* which paper a round extinguished (publish the list, anyone
-recomputes the hash). It does not support efficient inclusion/non-inclusion
-proofs; v2 swaps in a sorted-leaf merkle root (same `bytes32` field, no
-contract change) to enable per-IOU proofs and an on-chain redemption path.
+v1 committed `keccak256` of the sorted consumed-id list — enough to prove
+after the fact which paper a round extinguished, but with no per-IOU proofs.
+v2 commits a **sorted-leaf merkle root** in the same `bytes32` field of the
+signed Round struct (no digest change — the existing digest fixtures prove
+it), enabling per-IOU **inclusion** and **non-inclusion** proofs: the
+foundation of the redemption path. `executeRound` receives the id list as
+calldata and derives the root on-chain, so every round's leaf set is
+permanently reconstructible from public transaction calldata — creditors
+build proofs from chain data alone, trusting no coordinator.
+
+### Construction rules
+
+Third-party implementations (`src/merkle.ts` ↔
+`contracts/src/lib/ManifestMerkle.sol` are two implementations of this one
+spec, locked together by the shared fixture `test/fixtures/merkle.json`) must
+reproduce these rules exactly:
+
+1. **Leaves:** the consumed IOU ids, strictly ascending, unique, compared as
+   lowercase hex — identical to numeric `bytes32` order and to the netting
+   spec's rule-7 sort. Descending or duplicate input is rejected at build
+   time (`UnsortedLeaves`).
+2. **Leaf hash:** `L_i = keccak256(0x00 ‖ id_i)` — a single prefix byte,
+   then the raw 32-byte id.
+3. **Node hash:** `N = keccak256(0x01 ‖ left ‖ right)` — **ordered
+   concatenation, never sorted**. Commutative sorted-pair hashing (the
+   OpenZeppelin `MerkleProof` model) erases positional order and would make
+   the bracketing non-inclusion proofs below meaningless.
+4. **Level-up:** pair nodes `2j, 2j+1` into parent `j`; when a level has odd
+   width, the lone last node **promotes upward unchanged** — no
+   Bitcoin-style duplication, which creates ambiguous trees
+   (CVE-2012-2459 class): `root([a,b,c]) != root([a,b,c,c])` is
+   property-tested.
+5. **Root:** the single remaining node. The **empty manifest** keeps the v1
+   sentinel `keccak256("0x")` (Solidity: `keccak256("")`) — no tree is
+   built, and empty-round behavior is unchanged from v1.
+
+> **This is NOT an RFC 6962 tree.** Only RFC 6962's `0x00`/`0x01` prefix
+> domain separation — the standard second-preimage defense, keeping leaf
+> hashes and internal-node hashes in disjoint domains — is borrowed. The
+> tree **shape** is level-wise pairing with lone-node promotion, *not* RFC
+> 6962's largest-power-of-two split: a third party implementing the RFC's
+> split rule will produce different roots for every non-power-of-two leaf
+> count and diverge from this protocol. Under level-wise promotion the tree
+> shape is uniquely determined by the leaf count — the fact the
+> position-binding argument below rests on.
+
+### Proof encodings
+
+**Inclusion proof** — `(leaf, index, leafCount, siblings[])`: the raw IOU id
+(pre-leaf-hash), its 0-based position in the sorted leaf list, the manifest's
+total leaf count, and the sibling hashes bottom-up. Verification walk,
+identical in both implementations:
+
+1. Require `index < leafCount`; start with `h = keccak256(0x00 ‖ leaf)`,
+   `i = index`, `w = leafCount`.
+2. While `w > 1`: if `i` is odd, consume the next sibling as the **left**
+   input (`h = keccak256(0x01 ‖ sibling ‖ h)`); else if `i != w − 1`,
+   consume it as the **right** input (`h = keccak256(0x01 ‖ h ‖ sibling)`);
+   else — lone last node — promote `h` unchanged, consuming **no** sibling.
+   Then `i = i >> 1`, `w = (w + 1) >> 1`.
+3. Accept iff **all** siblings were consumed (no extras) and `h == root`.
+
+**Non-inclusion proof** — `(kind, a, b)` where `kind ∈ {BelowFirst,
+AboveLast, Bracket}` and `a`/`b` are inclusion proofs. All comparisons are
+**strict** inequalities, so an id equal to any proven leaf can never pass any
+branch:
+
+- **Sentinel short-circuit:** if `root == keccak256("0x")` the manifest is
+  empty and every id is absent — no proof structure is inspected.
+- **BelowFirst:** `a` verifies at `index == 0` and `id < a.leaf`.
+- **AboveLast:** `a` verifies at `index == leafCount − 1` and `id > a.leaf`.
+- **Bracket:** both `a` and `b` verify against the same root with
+  `a.leafCount == b.leafCount` and `b.index == a.index + 1` (adjacent
+  positions — skipping a leaf between them is structurally impossible), and
+  `a.leaf < id < b.leaf`.
+- A single-leaf tree (`leafCount == 1`, root = `keccak256(0x00 ‖ leaf)`) is
+  covered by BelowFirst/AboveLast.
+
+### Position-binding soundness
+
+Why can a prover not lie about `index` or `leafCount` to fake a bracketing
+claim (e.g. claim a non-last leaf is the last)? Because the sibling
+**consumption schedule** — at which levels a sibling is consumed and on which
+side — is completely determined by `(index, leafCount)`. Lying about either
+changes the schedule: the walk feeds different byte strings into keccak at
+some level, so reaching the true root would require a keccak256 second
+preimage. The one subtle case — shrinking `leafCount` to claim a non-last
+leaf is last — fails because the true tree pairs that node as a left child
+somewhere, while the fake path promotes it (or pairs it right); the inputs
+diverge and the roots mismatch. This argument is adversarially
+property-tested on both sides: random `index`/`leafCount` perturbations and
+sibling tampering must be rejected (fast-check in `test/merkle.test.ts`,
+512-run fuzz in `contracts/test/ClearingHubV2.t.sol`).
+
+One measured nuance (from the fuzz campaign): verification binds the
+**schedule**, not the literal `leafCount`. Certain leafCount lies are
+schedule-equivalent — e.g. claiming leafCount 4 instead of 3 for the leaf at
+index 0 consumes siblings identically and verifies in isolation. This is
+harmless for non-inclusion soundness because every branch adds
+kind-specific position checks (`index == 0`, `index == leafCount − 1`, equal
+leafCounts + adjacency) that reject every such lie in the shapes `redeemIOU`
+accepts — but implementers should not treat a verified inclusion proof's
+`leafCount` as an authenticated manifest size on its own.
+
+## IOU redemption
+
+Redemption is what makes "a tab with a limit" honest: Arclear Net is
+**bilateral credit with a collateralized recovery path**. When a debtor goes
+dark, their creditor does not need the coordinator, the debtor, or anyone's
+permission — they take the IOU the debtor already signed, prove on-chain that
+it was never settled, and recover the amount directly from the debtor's
+posted collateral.
+
+The parameters — `K` (staleness, default 3), `RING` (root-buffer depth,
+default 16), `L = MAX_IOU_LIFETIME` (default 86,400 s) — are **UNCALIBRATED**
+demo-scale placeholders; calibrating them against real round cadence is
+explicitly deferred to the Phase 3 calibration checkpoint. They are labeled
+as such on the contract's immutables and in the deploy script.
+
+### The redemption gate
+
+`redeemIOU(iou, sig, proofs[])` is permissionless (a relayer can submit —
+funds only ever credit the IOU's named creditor) and checks these rules **in
+order**; third-party implementations must reproduce them exactly:
+
+1. **Trivia:** `amount != 0` (`ZeroAmount`); `debtor != creditor`
+   (`SelfIou`).
+2. **Staleness — on-chain criterion:** the debtor must be **absent from the
+   last ≥ K executed rounds**: with `lastRound` 1-based (`nonce + 1` written
+   for every participant of an executed round; 0 = never participated), the
+   gate is `roundNonce ≥ lastRound[debtor] + K`, else revert
+   (`DebtorNotStale`). A never-participated debtor is stale once
+   `roundNonce ≥ K` — they have ignored every executed round that ever
+   existed. **The coordinator's wall-clock miss counters are an off-chain
+   early-warning signal only** and are never consulted on-chain: aborted
+   rounds and idle periods advance no on-chain clock, so the two views can
+   disagree — the executed-rounds criterion is the authoritative gate.
+3. **Coverage:** either the full history is still buffered
+   (`roundNonce ≤ RING` — nothing ever evicted), or the oldest buffered
+   round executed strictly before `expiry − L`
+   (`executedAt(oldest) < expiry − L`), else revert
+   (`CoverageWindowNotBuffered`). See the safety argument below.
+4. **Debtor signature:** `ECDSA.recover(hashIou(iou), sig) == debtor`
+   (`BadIouSignature`). `hashIou` is the same EIP-712 digest as the SDK's
+   `iouId` — the signature the debtor produced when issuing the IOU is
+   reused; no new signed struct exists.
+5. **Nullifier:** `!redeemed[id]` where `id = hashIou(iou)`
+   (`AlreadyRedeemed`).
+6. **Non-inclusion proofs — contract-derived, exact count:** exactly one
+   non-inclusion proof per buffered round, positionally matched to ascending
+   round nonces. **The contract derives the required set itself** from its
+   own `roundNonce` and `RING` — proofs are answers to the contract's
+   question, never the prover's choice, so omitting the one root that
+   contains the IOU is structurally impossible (`ProofCountMismatch` /
+   `NonInclusionProofInvalid`). Sentinel (empty-manifest) roots pass
+   structurally. This also closes the TOCTOU race: if a round executes
+   between proof generation and the redemption transaction being mined,
+   `roundNonce` has moved, the count/positional match fails, and the call
+   reverts — the creditor simply regenerates proofs from calldata and
+   resubmits. No round is ever silently uncovered.
+7. **Effects:** set `redeemed[id] = true`; debit the debtor's collateral by
+   the **full** amount or revert (`InsufficientCollateral`) — **no partial
+   redemption**, the nullifier is boolean; credit the creditor; emit
+   `IouRedeemed`. The hub's token balance is untouched — collateral
+   conservation, exactly as in rounds.
+
+**Expiry semantics:** redemption is valid **before and after** expiry —
+expiry bounds *netting*, not recovery (there is deliberately no
+`block.timestamp < expiry` check). Post-expiry is the calmer case: the
+consumption set is frozen. The redemption window closes *structurally* when
+the ring buffer rolls past `expiry − L` (coverage rule 3), not on a clock.
+
+### Coverage safety argument (the L-convention)
+
+The hazard: an IOU netted in round *r* could be double-claimed once *r*'s
+root is evicted from the ring — every remaining non-inclusion proof would
+pass honestly. The rule that prevents it needs no new signed field:
+
+- **Signing convention:** the SDK's `signIou` enforces
+  `expiry ≤ signTime + L`. An IOU can only be consumed in a round its debtor
+  signed (netting rule 6 plus `executeRound`'s unanimous signatures), and an
+  honest participant's netting drops IOUs with `expiry ≤ now + safetyWindow`
+  — so every round that consumed the IOU executed inside `[expiry − L,
+  expiry)`. *Assumption:* the 60 s netting safety window covers
+  proposal-to-execution latency, so no round consumes an IOU at or after its
+  expiry.
+- **Therefore:** when `executedAt(oldest buffered) < expiry − L`, every
+  round that could possibly have consumed the IOU is still buffered, and the
+  full proof set is complete — **net → cannot-redeem holds unconditionally
+  for any IOU signed under the convention**.
+- **Incentive-safe against violation:** only the debtor signs IOUs, and
+  double-claiming only debits the debtor — a debtor who signs
+  `expiry > signTime + L` weakens *only their own* double-claim protection.
+  A creditor cannot manufacture a long-lived IOU, and third parties are
+  untouched (redemption moves collateral strictly debtor → creditor).
+- **Fail-closed:** if rounds execute so fast that the buffer spans less than
+  `L` of wall-clock time, the coverage condition can never hold and
+  redemption narrows to unavailability — a **liveness loss, never a safety
+  loss**. Likewise `expiry ≤ L` with evicted history reverts (the would-be
+  underflow branch is guarded). This K/RING/L/cadence trade-off is exactly
+  the calibration question deferred to Phase 3.
+
+### Exclusivity, both directions
+
+Netting and redemption are mutually exclusive per IOU, enforced on-chain in
+both directions (and invariant-tested on real chain state):
+
+- **Redeem → cannot-net:** `executeRound` reverts (`NullifiedIdInManifest`)
+  if any consumed id is nullified. Coordinators additionally converge
+  off-chain by folding confirmed `IouRedeemed` logs into their netting
+  exclusions — the on-chain check is the backstop, not the primary filter.
+- **Net → cannot-redeem:** a consumed id is a leaf of some buffered root, so
+  its non-inclusion proof against that root cannot exist; the coverage rule
+  guarantees the containing round is still buffered for honest debtors.
+
+### Honest limitations
+
+- **Redemption races exit — best-effort by design.** `withdraw` is never
+  pausable (a v1 invariant that must not change: the exit guarantee is the
+  product's spine). A debtor can withdraw free collateral at any moment,
+  including between a creditor's proof generation and the redemption
+  transaction landing. Redemption therefore recovers **posted,
+  still-present collateral only** — it is a race against exit and makes no
+  recovery guarantee. Bilateral credit caps (`src/creditCap.ts`) remain the
+  actual exposure bound; redemption is the recovery path for what is still
+  there, not insurance.
+- **Keep-alive censorship is possible** — see the griefing analysis
+  addition below: a live debtor can keep the staleness gate closed while
+  censoring one creditor. Visible on-chain, costs gas every round, and
+  deliberately out of protocol scope to punish in the Net product.
+- **`redeemIOU` is pausable** (circuit-breaker parity with `executeRound` —
+  redemption is a settlement operation). The exit guarantee lives solely in
+  `withdraw`, which no pause ever touches.
+
+### Measured gas (n = 5, fresh state, uncalibrated defaults)
+
+Measured on the shipped contract via `gasleft()` deltas with all storage
+cold — the worst case client gas limits must cover, not warm steady-state:
+
+| Operation | Config | Measured gas |
+| --------- | ------ | ------------ |
+| `executeRound` | m = 10 consumed ids | 329,108 |
+| `executeRound` | m = 105 (demo scale) | 691,708 |
+| `executeRound` | m = 250 | 1,254,993 |
+| `redeemIOU` | RING = 16 full, 8-id manifests (16 proofs, depth 3) | 199,604 |
+
+Marginal cost ≈ 3,885 gas per consumed id (mildly superlinear from memory
+expansion). The SDK sets explicit size-parameterized limits with ≥ 1.5×
+margin (`gas = 300,000 + 40,000·n + 6,000·m`; `redeemIOU` flat 500,000) —
+explicit gas is mandatory on Arc, where estimation reserves the whole USDC
+balance. Snapshot persisted in `contracts/.gas-snapshot`.
 
 ## Explicit non-goals
 
-- No individual IOU redemption on-chain (requires non-inclusion proofs; the
-  merkle-manifest phase adds them).
 - No cross-currency rounds (one hub = one token; deploy one hub per token).
 - No fee-on-transfer token support.
 
@@ -226,3 +504,12 @@ contract change) to enable per-IOU proofs and an on-chain redemption path.
 > unresponsive participant stalled the round. v2's exclude-and-recompute
 > protocol (above) supersedes that: a stall is now a bounded latency cost,
 > never a safety cost. See THREAT-MODEL.md for the updated griefing row.
+
+> Superseded: v1 also listed individual IOU redemption as a non-goal — it
+> required non-inclusion proofs that did not exist. v2's merkle manifests
+> add them, and the [IOU redemption](#iou-redemption) section above
+> supersedes that: an unresponsive debtor's signed paper is now recoverable
+> on-chain against their posted collateral — best-effort by design (it
+> races the never-pausable `withdraw`), gated by on-chain staleness and the
+> L-bounded coverage rule, with uncalibrated K/RING/L labeled as such. See
+> THREAT-MODEL.md for the redemption rows.

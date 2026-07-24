@@ -50,6 +50,15 @@ They compose: net first, settle residuals over whatever rail you like.
   canonicalization; zero-sum enforcement; per-round manifest commitment; pause
   that can never trap funds. **26 tests: unit + revert matrix + 512-run fuzz +
   cross-stack digest parity.**
+- **IOU redemption (`ClearingHubV2`)** — the collateralized recovery path:
+  when a debtor goes dark past K executed rounds, their creditor calls
+  `redeemIOU` with the debtor's existing EIP-712 IOU signature plus merkle
+  non-inclusion proofs against every buffered round root (rebuilt from
+  public calldata — no coordinator trust) and recovers the amount straight
+  from the debtor's posted collateral; a nullifier guarantees the redeemed
+  IOU can never net again. Best-effort by design — it races the
+  never-pausable `withdraw`; spec and honesty notes in
+  [PROTOCOL.md](docs/PROTOCOL.md).
 - **[`src/`](src/) — the TypeScript SDK** (viem-only): EIP-712 IOU + consent
   signing ([iou.ts](src/iou.ts), [round.ts](src/round.ts)), the deterministic
   netting engine ([netting.ts](src/netting.ts), spec in
@@ -111,14 +120,25 @@ Real settlement on the v1 USDC hub — 105 IOUs, $5.52 gross, $0.43 settled,
 92.3% compression, one transaction:
 [`0x64f3c5…a2c69`](https://testnet.arcscan.app/tx/0x64f3c58b0af6efcc622248550a7ca0dd963c35251c3f79b2fd237da89cfa2c69)
 
-**Arclear Net v2** (`ClearingHubV2` — threshold consent: two-pass
-exclude-and-recompute, execution path identical to v1; set these as
-`HUB_V2_USDC` / `HUB_V2_EURC` in `.env`, v1 keys stay):
+**Arclear Net v2 — current hubs** (`ClearingHubV2` — threshold consent +
+merkle manifests + on-chain IOU redemption via `redeemIOU`; redemption
+params K=3 / RING=16 / L=86,400 s are **uncalibrated** demo-scale defaults,
+calibration deferred to the Phase 3 checkpoint; set these as `HUB_V2_USDC` /
+`HUB_V2_EURC` in `.env`, v1 keys stay):
 
 | token | hub | status |
 | ----- | --- | ------ |
-| USDC `0x3600…0000` | [`0xa984c64e1eA12B5aF5F573d58C3483fB8aB47f3c`](https://testnet.arcscan.app/address/0xa984c64e1eA12B5aF5F573d58C3483fB8aB47f3c) | source verified ✓ |
-| EURC `0x89B5…D72a` | [`0x57A047599EaCDbe77Cc8C1A7978f88D700332Cb3`](https://testnet.arcscan.app/address/0x57A047599EaCDbe77Cc8C1A7978f88D700332Cb3) | source verified ✓ |
+| USDC `0x3600…0000` | [`0x3b9a9617b91589a15A14122183e6305D9F0a5a16`](https://testnet.arcscan.app/address/0x3b9a9617b91589a15A14122183e6305D9F0a5a16) | source verified ✓ |
+| EURC `0x89B5…D72a` | [`0xECcCD7E43B0Caf4D81420483dEE20E5e258FB85E`](https://testnet.arcscan.app/address/0xECcCD7E43B0Caf4D81420483dEE20E5e258FB85E) | source verified ✓ |
+
+**Arclear Net v2 — Phase-1 hubs** (threshold consent only, no merkle
+manifests or redemption; superseded by the hubs above but still live
+on-chain):
+
+| token | hub | status |
+| ----- | --- | ------ |
+| USDC `0x3600…0000` | [`0xa984c64e1eA12B5aF5F573d58C3483fB8aB47f3c`](https://testnet.arcscan.app/address/0xa984c64e1eA12B5aF5F573d58C3483fB8aB47f3c) | source verified ✓ · superseded |
+| EURC `0x89B5…D72a` | [`0x57A047599EaCDbe77Cc8C1A7978f88D700332Cb3`](https://testnet.arcscan.app/address/0x57A047599EaCDbe77Cc8C1A7978f88D700332Cb3) | source verified ✓ · superseded |
 
 > Gas-token gotcha (documented so you don't rediscover it): USDC is Arc's
 > native gas token *and* the ERC-20 at `0x3600…0000` — one balance, two
@@ -190,9 +210,12 @@ In order, per the sweep data:
 1. **Threshold consent** — ✅ shipped (`ClearingHubV2`, live on Arc Testnet
    above): non-signers are *excluded and recomputed*, never outvoted; the
    final set still signs unanimously, preserving consent-before-settlement.
-2. **Merkle manifests** (same `bytes32` field, no contract change) →
-   per-IOU inclusion/non-inclusion proofs → **on-chain IOU redemption**
-   against a defaulter's collateral.
+2. **Merkle manifests + on-chain IOU redemption** — ✅ shipped
+   (`ClearingHubV2`, current hubs above): sorted-leaf merkle manifest roots
+   in the same `bytes32` field, per-IOU inclusion/non-inclusion proofs, and
+   `redeemIOU` recovery against an unresponsive debtor's collateral
+   (K/RING/L uncalibrated, labeled as such — calibration is the next
+   checkpoint).
 3. **Cross-currency rounds** — USDC and EURC legs settling atomically
    (payment-vs-payment, a miniature CLS on Arc).
 
