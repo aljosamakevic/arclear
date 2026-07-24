@@ -116,8 +116,10 @@ Roles](docs/PROTOCOL.md#roles); more vocabulary in
   collateral vault + atomic round settlement. Unanimous EIP-712 consent over a
   single shared digest of the full position set; strictly-ascending participant
   canonicalization; zero-sum enforcement; per-round manifest commitment; pause
-  that can never trap funds. **26 tests: unit + revert matrix + 512-run fuzz +
-  cross-stack digest parity.**
+  that can never trap funds. Extended by **`ClearingHubV2`** (threshold
+  consent, merkle manifests, on-chain redemption) and the stateless
+  **`PvPRouter`** for atomic cross-currency settlement. **101 Foundry tests:
+  unit + revert matrix + 512-run fuzz + cross-stack digest/merkle parity.**
 - **IOU redemption (`ClearingHubV2`)** — the collateralized recovery path:
   when a debtor goes dark past K executed rounds, their creditor calls
   `redeemIOU` with the debtor's existing EIP-712 IOU signature plus merkle
@@ -132,8 +134,10 @@ Roles](docs/PROTOCOL.md#roles); more vocabulary in
   netting engine ([netting.ts](src/netting.ts), spec in
   [PROTOCOL.md](docs/PROTOCOL.md)), bilateral credit caps
   ([creditCap.ts](src/creditCap.ts)), typed contract client
-  ([client.ts](src/client.ts)). **16 property tests (fast-check): zero-sum,
-  shuffle-determinism, dedup idempotence.**
+  ([client.ts](src/client.ts)), plus the merkle manifest library, PvP consent
+  layer, and exclusion-aware sweep model. **120 TypeScript tests (vitest +
+  fast-check): zero-sum, shuffle-determinism, dedup idempotence, merkle
+  byte-parity, PvP digest parity, and exact-match coordinator cross-validation.**
 - **[`demo/`](demo/)** — a 5-agent service economy (crawler → summarizer →
   oracle → trader → auditor) that signs ~100 IOUs and settles them in one
   round, on local anvil or Arc Testnet, with a zero-dependency live
@@ -152,8 +156,8 @@ sign → net → consent → settle flow in runnable code, ~15 minutes.
 ```bash
 git clone <this repo> && cd arclear
 npm install
-cd contracts && forge install && forge test && cd ..   # 26 tests
-npm test                                               # 16 property tests
+cd contracts && forge install && forge test && cd ..   # 101 Foundry tests
+npm test                                               # 120 TypeScript tests
 npm run e2e:anvil                                      # full flow, locally, ~20s
 ```
 
@@ -268,7 +272,21 @@ for). Reproduce with `npm run sweep`.
 
 ![compression vs reciprocity](docs/sweep/compression-vs-reciprocity.svg)
 
+*Median volume compression (y-axis, 0–100%) vs bilateral reciprocity (x-axis,
+0 = purely one-directional flows, 1 = every debt reciprocated), one line per
+participant count n. The lines stay high and nearly flat even at reciprocity 0
+for n ≥ 5 — multilateral netting cancels cyclic flows without needing pairs to
+trade both ways.*
+
 ![collateral saving vs n](docs/sweep/collateral-vs-n.svg)
+
+*Worst-placed participant's collateral saving (y-axis) vs participant count n
+(x-axis), showing median and the tenth percentile (p10) — the bad round an
+operator budgets for. Median rises from 37% at n=5 to 63% at n=50; the p10 is
+the honest floor: ≈ 0% at n ≤ 5 (small pools can leave someone saving nothing
+in one round of ten), 33% at n=15, 53% at n=50. Netting's value concentrates
+in larger pools. See [docs/CALIBRATION.md](docs/CALIBRATION.md) for how these
+idealized numbers hold up under realistic member uptime.*
 
 Findings, including the ones that surprised us:
 
