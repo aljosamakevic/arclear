@@ -67,8 +67,8 @@ only because aborted rounds pool paper into larger, better-compressing
 settles. The cost lands here (same cells, same CSV)
 **[UNCALIBRATED-INPUT-DATA]**:
 
-| n | p | abort_rate | unsettled_fraction | mean / p95 excluded-paper latency (rounds) |
-|---|---|-----------|--------------------|--------------------------------------------|
+| n | p | abort_rate | unsettled_fraction | mean / p95 carry-over latency (rounds) |
+|---|---|-----------|--------------------|----------------------------------------|
 | 15 | 0.95 | 0.2685 | 0.0418 | 1.4019 / 3.0000 |
 | 15 | 0.9 | 0.5850 | 0.1748 | 2.1370 / 5.0000 |
 | 30 | 0.95 | 0.5890 | 0.1460 | 2.0683 / 5.0000 |
@@ -127,8 +127,15 @@ divergence is a model-fidelity bug, not a tolerance to widen.
 
 ## 4. Carry-over cost of exclusion
 
-The price of exclude-and-recompute is latency for the excluded member's
-paper, which must wait for a later settling round. At the headline cells
+The price of exclude-and-recompute is **carry-over latency**: the metric
+counts every IOU that settled at least one round after it became eligible —
+paper delayed by exclusion **or by an aborted or empty round**. When a round
+aborts, the whole pool carries, including paper of members who were online
+and never excluded; at the abort-heavy cells cited here abort carry-over, not
+exclusion of the measured IOU's parties, dominates the observations. (The CSV
+keeps its historical column names `mean_excluded_latency_rounds` /
+`p95_excluded_latency_rounds` — the committed data is unchanged; read them as
+carry-over latency.) At the headline cells
 (table in §2, latency columns) **[UNCALIBRATED-INPUT-DATA]**: mean latency
 runs 1.4019 rounds (n=15, p=0.95) to 3.4830 rounds (n=50, p=0.9) with p95 at
 3–7 rounds — and at the abort-heavy cells most paper (0.6211 at n=30 p=0.9,

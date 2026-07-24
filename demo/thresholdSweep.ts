@@ -20,8 +20,11 @@
  * - worst-participant saving = per-seed minimum across settled rounds of the
  *   v1 per-round metric min over net debtors of 1 − netDebit/grossOutflow
  *   (median + p10 across seeds) — what an operator budgets collateral for
- * - excluded-paper settlement latency in rounds, pooled (mean + p95) — the
- *   CONS-04 carry-over cost
+ * - carry-over settlement latency in rounds, pooled (mean + p95) — the
+ *   CONS-04 carry-over cost. Counts ALL paper that settled ≥1 round after
+ *   becoming eligible: delayed by exclusion OR by an aborted/empty round —
+ *   not exclusively the excluded member's paper. The CSV columns keep their
+ *   historical *_excluded_latency_rounds names (committed data unchanged).
  * - abort_rate = aborted / (settled + aborted) rounds
  * - exclusion_round_fraction = settled-2pass / all settled rounds
  * - unsettled_fraction = Σ unsettled / Σ generated IOUs at horizon end
