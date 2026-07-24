@@ -18,10 +18,10 @@ Requirements for the v2 milestone (this roadmap). Derived 1:1 from `docs/V2-BRIE
 
 ### Merkle Manifests & IOU Redemption (brief Phase 1)
 
-- [ ] **MERK-01**: `manifestHash` preimage is a sorted-leaf merkle root — same `bytes32` field, no ClearingHub interface change
-- [ ] **MERK-02**: `src/merkle.ts` + `contracts/src/lib/ManifestMerkle.sol` build roots and prove inclusion and non-inclusion (adjacent-leaf bracketing), with TS↔Solidity proof parity fixtures
-- [ ] **MERK-03**: A creditor can call `redeemIOU(iou, sig, proofs[])` with non-inclusion proofs against the last k round roots to debit an unresponsive debtor's collateral directly (debtor flagged after missing K consecutive consent windows)
-- [ ] **MERK-04**: A nullifier mapping prevents re-redemption; redeem→cannot-net and net→cannot-redeem exclusivity is tested
+- [x] **MERK-01**: `manifestHash` preimage is a sorted-leaf merkle root — same `bytes32` field, no ClearingHub interface change
+- [x] **MERK-02**: `src/merkle.ts` + `contracts/src/lib/ManifestMerkle.sol` build roots and prove inclusion and non-inclusion (adjacent-leaf bracketing), with TS↔Solidity proof parity fixtures
+- [x] **MERK-03**: A creditor can call `redeemIOU(iou, sig, proofs[])` with non-inclusion proofs against the last k round roots to debit an unresponsive debtor's collateral directly (debtor flagged after missing K consecutive consent windows)
+- [x] **MERK-04**: A nullifier mapping prevents re-redemption; redeem→cannot-net and net→cannot-redeem exclusivity is tested
 
 ### Calibration Checkpoint (brief checkpoint, between Phases 1 and 2)
 
@@ -88,10 +88,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CONS-04 | Phase 1 | Complete |
 | CONS-05 | Phase 1 | Complete |
 | CONS-06 | Phase 1 | Complete |
-| MERK-01 | Phase 2 | Pending |
-| MERK-02 | Phase 2 | Pending |
-| MERK-03 | Phase 2 | Pending |
-| MERK-04 | Phase 2 | Pending |
+| MERK-01 | Phase 2 | Complete |
+| MERK-02 | Phase 2 | Complete |
+| MERK-03 | Phase 2 | Complete |
+| MERK-04 | Phase 2 | Complete |
 | CALB-01 | Phase 3 | Pending |
 | CALB-02 | Phase 3 | Pending |
 | NOVA-01 | Phase 4 | Pending |

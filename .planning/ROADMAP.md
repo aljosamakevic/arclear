@@ -20,7 +20,7 @@ Arclear v2 evolves the shipped v1 netting primitive into a two-product clearing 
 - Decimal phases (2.1, 2.2): Urgent insertions (marked with INSERTED)
 
 - [x] **Phase 1: Threshold Consent (brief Phase 0)** - Exclude-and-recompute rounds keep settling through unresponsive members; unanimity over the final executed set (completed 2026-07-22)
-- [ ] **Phase 2: Merkle Manifests & IOU Redemption (brief Phase 1)** - Sorted-leaf merkle manifest roots with inclusion/non-inclusion proofs and an on-chain `redeemIOU` recovery path
+- [x] **Phase 2: Merkle Manifests & IOU Redemption (brief Phase 1)** - Sorted-leaf merkle manifest roots with inclusion/non-inclusion proofs and an on-chain `redeemIOU` recovery path (completed 2026-07-24)
 - [ ] **Phase 3: Calibration Checkpoint (brief checkpoint)** - Sweep-driven decision gate: what member count threshold consent unlocks, what q/N margin params survive p10 rounds
 - [ ] **Phase 4: Novation — ArclearCCP.sol (brief Phase 2)** - Members face the hub; matched-book invariant holds under any novation/settlement sequence
 - [ ] **Phase 5: Margin (brief Phase 3)** - EWMA-based IM, variation margin calls, permissionless `declareDefault`, procyclicality cap — all parameters labeled uncalibrated
@@ -105,7 +105,7 @@ Plans:
 
 **Wave 7**
 
-- [ ] 02-08-PLAN.md — PROTOCOL/THREAT-MODEL/README docs, Arc testnet redeploy (USDC+EURC), human verify (wave 7)
+- [x] 02-08-PLAN.md — PROTOCOL/THREAT-MODEL/README docs, Arc testnet redeploy (USDC+EURC), human verify (wave 7)
 
 Note: Phases 1+2 complete = shippable "Arclear Net v2" release (showcase resubmission moment).
 
@@ -200,7 +200,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8. Ex
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Threshold Consent | 5/5 | Complete    | 2026-07-22 |
-| 2. Merkle Manifests & IOU Redemption | 7/8 | In Progress|  |
+| 2. Merkle Manifests & IOU Redemption | 8/8 | Complete    | 2026-07-24 |
 | 3. Calibration Checkpoint | 0/TBD | Not started | - |
 | 4. Novation — ArclearCCP.sol | 0/TBD | Not started | - |
 | 5. Margin | 0/TBD | Not started | - |

@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
-stopped_at: Phase 2 context gathered (auto)
-last_updated: "2026-07-23T00:34:09.538Z"
+status: ready_to_plan
+stopped_at: Phase 2 complete (8/8) — ready to discuss Phase 3
+last_updated: 2026-07-24T10:47:05.631Z
 last_activity: 2026-07-23 -- Phase 2 execution started
 progress:
   total_phases: 8
   completed_phases: 1
   total_plans: 13
-  completed_plans: 5
+  completed_plans: 13
   percent: 13
 ---
 
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-22)
 
 **Core value:** A CCP is defined by operating *through* a member failure: the system must keep settling when members stall or default, with every risk mechanism legible, invariant-tested, and honest about its calibration status.
-**Current focus:** Phase 2 — Merkle Manifests & IOU Redemption (brief Phase 1)
+**Current focus:** Phase 3 — calibration checkpoint (brief checkpoint)
 
 ## Current Position
 
-Phase: 2 (Merkle Manifests & IOU Redemption (brief Phase 1)) — EXECUTING
-Plan: 1 of 8
-Status: Executing Phase 2
-Last activity: 2026-07-23 -- Phase 2 execution started
+Phase: 3
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-07-24
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -36,7 +36,7 @@ Progress: [░░░░░░░░░░] 0%
 
 **Velocity:**
 
-- Total plans completed: 5
+- Total plans completed: 13
 - Average duration: -
 - Total execution time: 0 hours
 
@@ -45,6 +45,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 1 | 5 | - | - |
+| 2 | 8 | - | - |
 
 **Recent Trend:**
 
