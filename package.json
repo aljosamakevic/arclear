@@ -15,7 +15,8 @@
     "demo": "tsx demo/server.ts",
     "report": "tsx demo/report.ts",
     "sweep": "tsx demo/sweep.ts",
-    "sweep:threshold": "tsx demo/thresholdSweep.ts"
+    "sweep:threshold": "tsx demo/thresholdSweep.ts",
+    "sweep:margin": "tsx demo/marginSweep.ts"
   },
   "dependencies": {
     "viem": "^2.21.0"
