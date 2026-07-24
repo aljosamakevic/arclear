@@ -157,5 +157,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4.
 |-------|----------------|--------|-----------|
 | 1. Threshold Consent | 5/5 | Complete    | 2026-07-22 |
 | 2. Merkle Manifests & IOU Redemption | 8/8 | Complete    | 2026-07-24 |
-| 3. Calibration Checkpoint | 3/3 | Complete   | 2026-07-24 |
+| 3. Calibration Checkpoint | 3/3 | Complete    | 2026-07-24 |
 | 4. Cross-Currency PvP Rounds | 0/TBD | Not started | - |

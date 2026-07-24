@@ -25,8 +25,8 @@ Requirements for the v2 milestone (this roadmap). Derived 1:1 from `docs/V2-BRIE
 
 ### Calibration Checkpoint (brief checkpoint, between Phases 1 and 2)
 
-- [ ] **CALB-01**: `demo/sweep.ts` extended to simulate threshold-consent rounds with unresponsive members — answers what member count threshold consent actually unlocks in practice
-- [ ] **CALB-02**: Sweep simulates margin/undercollateralization scenarios — answers what q/N margin parameters survive the p10 rounds; if answers are ugly, CCP scope is revisited with data
+- [x] **CALB-01**: `demo/sweep.ts` extended to simulate threshold-consent rounds with unresponsive members — answers what member count threshold consent actually unlocks in practice
+- [x] **CALB-02**: Sweep simulates margin/undercollateralization scenarios — answers what q/N margin parameters survive the p10 rounds; if answers are ugly, CCP scope is revisited with data
 
 ### Cross-Currency PvP (brief Phase 6)
 
@@ -68,8 +68,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | MERK-02 | Phase 2 | Complete |
 | MERK-03 | Phase 2 | Complete |
 | MERK-04 | Phase 2 | Complete |
-| CALB-01 | Phase 3 | Pending |
-| CALB-02 | Phase 3 | Pending |
+| CALB-01 | Phase 3 | Complete |
+| CALB-02 | Phase 3 | Complete |
 | NOVA-01 | — | Removed (2026-07-24) |
 | NOVA-02 | — | Removed (2026-07-24) |
 | NOVA-03 | — | Removed (2026-07-24) |
