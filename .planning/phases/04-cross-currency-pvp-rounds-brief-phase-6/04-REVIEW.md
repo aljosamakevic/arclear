@@ -23,7 +23,11 @@ findings:
   warning: 3
   info: 3
   total: 7
-status: issues_found
+status: fixes_applied
+fixes_applied_at: 2026-07-24T17:41:00Z
+fixes:
+  fixed: [CR-01, WR-01, WR-02, WR-03]
+  deferred: [IN-01, IN-02, IN-03]
 ---
 
 # Phase 4: Code Review Report
@@ -31,7 +35,7 @@ status: issues_found
 **Reviewed:** 2026-07-24T17:20:53Z
 **Depth:** standard
 **Files Reviewed:** 14
-**Status:** issues_found
+**Status:** fixes_applied — CR-01 and WR-01..03 fixed (SDK/demo only, deployed router untouched); IN-01..03 deferred with rationale. Verified: `tsc --noEmit`, vitest 120/120, forge 101/101, `e2e:anvil` PASS.
 
 ## Summary
 
@@ -136,6 +140,18 @@ is), it must be documented in THREAT-MODEL.md with its harm bound, and the
 PROTOCOL.md claim that local verification catches coordinator lies must be
 narrowed accordingly.
 
+**Outcome:** FIXED (`fix(04): CR-01`, commit `c6c5ad9`). `verifyPvPProposal`'s
+FX-pair loop now builds lowercase id sets from both leg manifests and, after
+the direction and rate checks, requires each shared-`ref` pair to be jointly
+consumed or jointly deferred — refusing as data with a reason naming the
+missing counter-leg consumption. Regression test in `test/pvp.test.ts`
+reproduces the exact attack (paying USDC IOU consumed, receiving EURC IOU
+stripped, EURC leg quorum-padded with dave→carol) in BOTH stripping
+directions and asserts the verdict flips to refused. THREAT-MODEL.md gains
+attack-surface row 27 (counter-leg stripping — now provably caught at local
+verification); PROTOCOL.md's pairing rule states inclusion symmetry. SDK-only
+fix; the deployed router is untouched.
+
 ## Warnings
 
 ### WR-01: `runPvPRound` does not persist pending state on the coordinators, weakening double-settle protection on the receipt-transport path
@@ -163,6 +179,18 @@ broadcast, and reconcile both hubs by matching the logged `RoundExecuted`
 `reconcilePendingSubmission` to the two-hub case rather than delegating to an
 optional callback.
 
+**Outcome:** FIXED (`fix(04): WR-01 WR-02`, commit `205c4ff`). `PvPLegState`
+gains `recordPendingSubmission`/`clearPendingSubmission` (implemented by
+`Coordinator` over its existing private `pendingSubmission`); `runPvPRound`'s
+submit persists the pending record on BOTH coordinators before broadcast,
+re-records with the txHash after broadcast, and clears only on definitive
+revert or confirmed fold — so each hub's own `reconcilePendingSubmission`
+backs the PvP path exactly like ordinary rounds. Tested with a submit that
+mines but throws on receipt: with logs visible the wrapper itself folds
+(see WR-02); with no logs visible the run aborts as data but both
+coordinators retain full reconcilable pending records and nothing is folded
+blindly (`test/pvpRound.test.ts`).
+
 ### WR-02: `runPvPRound` mislabels its own mined-successful settlement as `blocked` when the receipt wait fails
 
 **File:** `demo/pvp.ts:632-648`
@@ -177,6 +205,18 @@ digest to distinguish "our round executed" from "someone else's did."
 **Fix:** Before classifying, fetch `RoundExecuted` for the submitted
 `roundNonce` on each hub and compare its `roundHash` to the leg digests; if
 they match, treat it as `settled` and fold ids, not `blocked`.
+
+**Outcome:** FIXED (`fix(04): WR-01 WR-02`, commit `205c4ff`). Submission-
+failure classification now FIRST matches each hub's logged `RoundExecuted`
+`roundHash` against the submitted leg digests (new
+`HubClient.roundExecutedHashes` reader, mirrored in `PvPLegDeps.reader`);
+both legs matching reclassifies the run as `settled` and folds both hubs
+through the same `foldSettled` path as a confirmed receipt (pending records
+cleared). Only then do nonce comparisons decide blocked-vs-aborted.
+`attemptPvPRound`'s submit-stage abort carries `submitted:
+{ proposal, results }` to make the fold possible. Test: mined-successful tx
+with failing receipt wait classifies `settled`, folds per-hub settledIds,
+and clears pending (`test/pvpRound.test.ts`).
 
 ### WR-03: SDK `unionParticipants` omits the strict-ascending / zero-address guards the on-chain `_unionOf` enforces
 
@@ -197,6 +237,13 @@ not enforce the spec's precondition.
 `unionParticipants` (matching the contract), or soften the doc comment to state
 it assumes pre-sorted, non-zero inputs and is not a validator.
 
+**Outcome:** FIXED (`fix(04): WR-03`, commit `8067c90`). Took the strict
+option: `unionParticipants` now mirrors `_unionOf` exactly — a `prev` cursor
+seeded at address(0) rejects any non-strictly-ascending merged stream (which
+also rejects the zero address), throwing where the router would revert
+`UnionNotStrictlyAscending`. Tests cover unsorted input, in-list duplicates,
+and the zero address in either list (`test/pvp.test.ts`).
+
 ## Info
 
 ### IN-01: Division used in `demo/fx.ts` amount construction
@@ -211,6 +258,10 @@ inexact result (lines 42-47), so no unchecked rounded amount can flow onward.
 one-line note that this is the only sanctioned `/` and only as an unverified
 candidate constructor, to keep the invariant grep-clean.
 
+**Outcome:** DEFERRED — reviewer states no fix is required; the `/` is a
+demo-side amount constructor immediately guarded by the exact D-04
+cross-multiplication check, and the code already carries that note.
+
 ### IN-02: `attemptPvPRound.finalize` relies on non-null assertions gated by prior screening
 
 **File:** `demo/pvp.ts:375-379`
@@ -223,6 +274,10 @@ pushed into a signature array.
 **Fix:** Add a defensive guard (or narrow the type) so a screening regression
 fails loudly at assembly rather than producing a malformed signature set.
 
+**Outcome:** DEFERRED — hardening of an already-safe invariant (screening
+gates finalize); low-risk refactor best batched with the next demo/pvp.ts
+pass rather than widening this fix's surface.
+
 ### IN-03: Duplicated union-merge logic between SDK, contract, and test harness
 
 **File:** `src/pvp.ts:90-108`, `contracts/src/PvPRouter.sol:214-246`, `contracts/test/utils/PvPRoundBuilder.sol:176-200`
@@ -233,6 +288,10 @@ divergence in validation strictness.
 **Fix:** Keep, but ensure a shared property/parity test exercises all three
 against the same random sorted inputs (the vitest `unionParticipants` property
 covers the SDK copy only).
+
+**Outcome:** DEFERRED — WR-03 narrowed the drift risk by making the SDK copy
+enforce the same precondition the contract does; a shared three-way parity
+vector belongs in the fixture-generation pass, not this fix.
 
 ---
 
