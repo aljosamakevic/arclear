@@ -1,4 +1,4 @@
-import { keccak256, stringToHex, type Address, type Hex } from "viem";
+import { keccak256, stringToHex, type Address, type Hex, type WalletClient } from "viem";
 import type { Account } from "viem/accounts";
 import { net } from "../src/netting.js";
 import { buildProposal, rebuildProposal } from "../src/round.js";
@@ -10,7 +10,7 @@ import {
   verifyPvPConsent,
 } from "../src/pvp.js";
 import type { NetResult, PvPProposal, RoundProposal, SignedIou } from "../src/types.js";
-import { screenConsents, type ConsentCollection } from "./coordinator.js";
+import { screenConsents, type ConsentCollection, type ExecutedRound } from "./coordinator.js";
 import { quoteToRate, type FxQuote } from "./fx.js";
 
 /**
@@ -476,4 +476,214 @@ export async function attemptPvPRound(args: {
     excluded,
     2,
   );
+}
+
+/** One hub's WR-01 pending record: what was in flight, recorded BEFORE broadcast. */
+export interface PvPPending {
+  roundNonce: bigint;
+  digest: Hex;
+  consumedIds: Hex[];
+  sentAtBlock: bigint;
+}
+
+/**
+ * The per-hub state surface the wrapper mutates. demo/coordinator.ts's
+ * Coordinator satisfies it structurally (openIous getter, settledIds/
+ * redeemedIds/rounds fields, hold/release) — the wrapper gains NO authority:
+ * it can only freeze round assembly and fold confirmed settlement data.
+ */
+export interface PvPLegState {
+  readonly openIous: SignedIou[];
+  settledIds: Set<Hex>;
+  redeemedIds: Set<Hex>;
+  rounds: ExecutedRound[];
+  hold(reason: string): void;
+  release(): void;
+}
+
+/** One hub's injected dependencies: address, a HubClient-shaped nonce reader,
+ *  and the coordinator (or equivalent) state surface. */
+export interface PvPLegDeps {
+  hub: Address;
+  reader: { roundNonce(): Promise<bigint> };
+  state: PvPLegState;
+}
+
+export interface PvPRunDeps {
+  usdc: PvPLegDeps;
+  eurc: PvPLegDeps;
+  router: Address;
+  /** PvPRouterClient-shaped submitter — formula-gas atomic submission. */
+  routerClient: {
+    executePvP(
+      wallet: WalletClient,
+      proposal: PvPProposal,
+      legSignatures: { usdc: Hex[]; eurc: Hex[] },
+      pvpSignatures: Hex[],
+    ): Promise<Hex>;
+  };
+  relayerWallet: WalletClient;
+  pub: {
+    getBlockNumber(): Promise<bigint>;
+    waitForTransactionReceipt(args: { hash: Hex }): Promise<{ status: string }>;
+  };
+  providers: Map<string, PvPConsentProvider>;
+  quote: FxQuote;
+  windowMs: number;
+  now: bigint;
+  chainId?: number;
+  /** Observability hook: fires with both hubs' WR-01 pending records the
+   * moment they are taken — always BEFORE the broadcast. */
+  onPending?: (pending: { usdc: PvPPending; eurc: PvPPending }) => void;
+}
+
+/** Structured wrapper result — callers branch on `outcome`, never on throws. */
+export type PvPRunResult =
+  | { outcome: "settled"; txHash: Hex; rounds: { usdc: ExecutedRound; eurc: ExecutedRound } }
+  | { outcome: "blocked"; reason: string }
+  | { outcome: "aborted"; reason: string }
+  | { outcome: "empty"; reason: string };
+
+/**
+ * Chain-aware PvP wrapper: hold BOTH hubs (Pitfall 4 — no ordinary round may
+ * advance either nonce while the bundle is in flight), read both live nonces,
+ * source the rate from the FX quote, run the chain-free attemptPvPRound with
+ * a submit that records WR-01 pending state for BOTH hubs before
+ * broadcasting, and classify any submission failure from the two chains'
+ * nonces — never from error strings (WR-02). On settlement each hub's
+ * settledIds absorbs ONLY its own leg's consumedIds and both coordinators'
+ * rounds gain a PvP-tagged entry (per-hub state stays separate, Pitfall 3).
+ *
+ * Residual note (WR-01 half): a receipt-transport failure (as opposed to a
+ * definitive revert) leaves "did our tx mine?" open; the pending records
+ * surfaced via onPending carry the digests a caller needs to reconcile
+ * against RoundExecuted logs before its next round, exactly like the
+ * single-hub reconcilePendingSubmission does.
+ */
+export async function runPvPRound(deps: PvPRunDeps): Promise<PvPRunResult> {
+  const { usdc, eurc } = deps;
+  const holdReason = "PvP bundle in flight — ordinary rounds refused on both hubs";
+  usdc.state.hold(holdReason);
+  eurc.state.hold(holdReason);
+  try {
+    const nonceU = await usdc.reader.roundNonce();
+    const nonceE = await eurc.reader.roundNonce();
+    const { fxNumerator, fxDenominator } = quoteToRate(deps.quote);
+
+    const attempt = await attemptPvPRound({
+      usdc: {
+        ious: usdc.state.openIous,
+        hub: usdc.hub,
+        expectedRoundNonce: nonceU,
+        settledIds: usdc.state.settledIds,
+        redeemedIds: usdc.state.redeemedIds,
+      },
+      eurc: {
+        ious: eurc.state.openIous,
+        hub: eurc.hub,
+        expectedRoundNonce: nonceE,
+        settledIds: eurc.state.settledIds,
+        redeemedIds: eurc.state.redeemedIds,
+      },
+      router: deps.router,
+      fxNumerator,
+      fxDenominator,
+      providers: deps.providers,
+      windowMs: deps.windowMs,
+      now: deps.now,
+      chainId: deps.chainId,
+      submit: async (proposal, legSigs, pvpSigs) => {
+        // WR-01 generalized: record the in-flight submission for BOTH hubs
+        // BEFORE broadcasting, so a failure can only ever be reconciled from
+        // chain state — never silently re-netted.
+        const sentAtBlock = await deps.pub.getBlockNumber();
+        deps.onPending?.({
+          usdc: {
+            roundNonce: proposal.usdcLeg.roundNonce,
+            digest: proposal.usdcLeg.digest,
+            consumedIds: proposal.usdcLeg.consumedIds,
+            sentAtBlock,
+          },
+          eurc: {
+            roundNonce: proposal.eurcLeg.roundNonce,
+            digest: proposal.eurcLeg.digest,
+            consumedIds: proposal.eurcLeg.consumedIds,
+            sentAtBlock,
+          },
+        });
+        const txHash = await deps.routerClient.executePvP(
+          deps.relayerWallet,
+          proposal,
+          legSigs,
+          pvpSigs,
+        );
+        const receipt = await deps.pub.waitForTransactionReceipt({ hash: txHash });
+        if (receipt.status !== "success") {
+          // Definitively mined-and-reverted — nothing executed on either hub.
+          // Classification below reads chain nonces (WR-02), never this string.
+          throw new Error(`pvp tx reverted: ${txHash}`);
+        }
+        return txHash;
+      },
+    });
+
+    if (attempt.kind === "empty") return { outcome: "empty", reason: attempt.reason };
+
+    if (attempt.kind === "aborted") {
+      if (attempt.stage === "submit") {
+        // WR-02 generalized: classify the failure from BOTH chains' nonces.
+        // A moved nonce means a concurrent round executed on that hub —
+        // expected protocol behavior returned as data, not a fault.
+        const afterU = await usdc.reader.roundNonce();
+        const afterE = await eurc.reader.roundNonce();
+        if (afterU !== nonceU || afterE !== nonceE) {
+          return {
+            outcome: "blocked",
+            reason:
+              `concurrent round advanced a hub nonce (USDC ${nonceU}→${afterU}, ` +
+              `EURC ${nonceE}→${afterE}) — PvP bundle stale, retry from a fresh pass`,
+          };
+        }
+      }
+      return { outcome: "aborted", reason: attempt.reason };
+    }
+
+    // Settled: fold per-hub state — each hub absorbs ONLY its own leg
+    // (Pitfall 3: ids are hub-domain-separated by construction, and keeping
+    // the folds separate preserves each hub's reconciliation logic).
+    const { proposal, results } = attempt;
+    const legRound = (leg: RoundProposal, result: NetResult): ExecutedRound => {
+      const deltas: Record<string, string> = {};
+      leg.participants.forEach((p, i) => {
+        deltas[p.toLowerCase()] = leg.deltas[i].toString();
+      });
+      return {
+        roundNonce: leg.roundNonce.toString(),
+        txHash: attempt.txHash,
+        manifestHash: leg.manifestHash,
+        participants: leg.participants.length,
+        grossVolume: result.grossVolume.toString(),
+        settledVolume: result.settledVolume.toString(),
+        iouCount: leg.consumedIds.length,
+        deltas,
+        excluded: attempt.excluded.map((a) => a.toLowerCase()),
+        passCount: attempt.passCount,
+        pvp: { fxNumerator: fxNumerator.toString(), fxDenominator: fxDenominator.toString() },
+      };
+    };
+    const roundU = legRound(proposal.usdcLeg, results.usdc);
+    const roundE = legRound(proposal.eurcLeg, results.eurc);
+    for (const id of proposal.usdcLeg.consumedIds) {
+      usdc.state.settledIds.add(id.toLowerCase() as Hex);
+    }
+    for (const id of proposal.eurcLeg.consumedIds) {
+      eurc.state.settledIds.add(id.toLowerCase() as Hex);
+    }
+    usdc.state.rounds.push(roundU);
+    eurc.state.rounds.push(roundE);
+    return { outcome: "settled", txHash: attempt.txHash, rounds: { usdc: roundU, eurc: roundE } };
+  } finally {
+    usdc.state.release();
+    eurc.state.release();
+  }
 }
