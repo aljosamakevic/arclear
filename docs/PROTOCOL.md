@@ -518,12 +518,141 @@ cold — the worst case client gas limits must cover, not warm steady-state:
 | `executeRound` | m = 105 (demo scale) | 691,708 |
 | `executeRound` | m = 250 | 1,254,993 |
 | `redeemIOU` | RING = 16 full, 8-id manifests (16 proofs, depth 3) | 199,604 |
+| `executePvP` | two legs, n = 3+3, m = 10+10, union 4 | 563,814 |
+| `executePvP` | two legs, n = 5+5, m = 105+105 (demo scale), union 5 | 1,734,897 |
 
 Marginal cost ≈ 3,885 gas per consumed id (mildly superlinear from memory
 expansion). The SDK sets explicit size-parameterized limits with ≥ 1.5×
-margin (`gas = 300,000 + 40,000·n + 6,000·m`; `redeemIOU` flat 500,000) —
+margin (`gas = 300,000 + 40,000·n + 6,000·m`; `redeemIOU` flat 500,000;
+`executePvP` composes the leg formula twice plus a measured router term:
+`350,000 + 2·300,000 + 40,000·(n₁+n₂) + 6,000·(m₁+m₂) + 15,000·n_union`) —
 explicit gas is mandatory on Arc, where estimation reserves the whole USDC
-balance. Snapshot persisted in `contracts/.gas-snapshot`.
+balance. Snapshot persisted in `contracts/.gas-snapshot` (snapshot lines
+record full-test gas including setup; the table above records the call-only
+`gasleft()` deltas the client formulas are fitted against). For scale: the
+live anvil e2e PvP bundle (4+4 IOUs, warm collateral slots) measures
+~507,442 gas.
+
+## Cross-currency PvP rounds
+
+One hub clears one token. Cross-currency settlement composes two hubs: a
+stateless `PvPRouter` (`contracts/src/PvPRouter.sol`) executes a USDC leg and
+a EURC leg — each an **ordinary netting round on its own hub**, built with the
+netting spec and Round struct above, unchanged — inside **one** transaction.
+Both legs settle or neither does: payment-vs-payment, a miniature CLS on Arc.
+The deployed hubs are untouched and unaware of the router; `executePvP` is
+permissionless, and the router holds no funds, no owner, no pause switch, and
+no storage beyond two immutable hub addresses.
+
+### PvPRound (EIP-712)
+
+The router is its own EIP-712 verifying contract:
+
+```json
+{ "name": "ArclearPvPRouter", "version": "1", "chainId": 5042002, "verifyingContract": "<router>" }
+```
+
+Typehash (verbatim — `src/pvp.ts` and `PvPRouter.sol` must byte-match; the
+shared digest fixture locks them together):
+
+```
+PvPRound(bytes32 usdcLegDigest,bytes32 eurcLegDigest,uint256 fxNumerator,uint256 fxDenominator)
+```
+
+| field | type | meaning |
+| ----- | ---- | ------- |
+| usdcLegDigest | bytes32 | the USDC leg's hub Round digest (`hubUSDC.hashRound`) |
+| eurcLegDigest | bytes32 | the EURC leg's hub Round digest (`hubEURC.hashRound`) |
+| fxNumerator | uint256 | EURC base units of the agreed rate pair; never zero |
+| fxDenominator | uint256 | USDC base units of the agreed rate pair; never zero |
+
+Every member of the **sorted union** of the two legs' participant sets signs
+this digest — exactly one signature per union member, index-aligned to the
+merged ascending order. The union is a superset of everyone whose signed leg
+delta assumed the other leg settles at this rate, so union-signing is sound
+for any set relationship: overlapping, disjoint, or identical participant
+sets are all normal (a member appears in a leg iff their IOUs were consumed
+there — netting rule 6 applies per hub). Signing the PvPRound moves no
+balance by itself: balance movement still requires that member's ordinary
+leg consent on the leg containing them, which the hubs verify unchanged.
+
+### Atomicity argument
+
+`executePvP` checks, in order: rate sanity (`ZeroRate`); calldata-vs-signed
+leg binding — each leg's digest is recomputed via that hub's **public,
+parity-locked `hashRound`** over the calldata leg (manifest root derived by
+`ManifestMerkle.rootOf`, never reimplemented in the router) and must equal
+the digest the union signed (`LegDigestMismatch`), so the PvPRound signature
+transitively binds the exact calldata being executed; union consent
+(`UnionNotStrictlyAscending`, `PvPSignatureCountMismatch`,
+`BadPvPSignature`); then it executes both legs as **plain high-level
+external calls** — no try/catch, no low-level calls, by construction.
+Revert bubbling is the mechanism: a revert in either leg (bad signature,
+wrong nonce, insufficient collateral, paused hub, nullified id, …) bubbles
+up and reverts the whole transaction, so neither leg ever settles alone
+*through the router*. Catching a leg failure is the only way the router
+itself could break both-or-neither, which is why no such wrapper exists.
+
+The hub pair is pinned as **constructor immutables** — hub addresses never
+come from calldata. Because `verifyingContract` is the router and a router
+deployment is permanently bound to one hub pair, a PvPRound signature is
+consent to legs on exactly those two hubs; substituting a malicious hub is
+structurally closed. The router needs no replay state either: each signed
+leg digest binds its hub's `roundNonce`, so once either leg executes (by any
+path) the bundle can never execute again.
+
+The both-or-neither guarantee holds within the router path and against every
+failure/revert mode. It does **not** hold against an adversary who obtains
+and unilaterally submits one leg's full signature set — leg consents are
+ordinary hub Round signatures, valid standalone, and `executeRound` is
+permissionless. That residual is stated plainly, with its harm bound, in
+THREAT-MODEL.md (single-leg extraction).
+
+### Rate semantics
+
+The agreed rate is a base-unit amount pair, never a decimal and never a
+quotient: `fxNumerator` = EURC base units, `fxDenominator` = USDC base
+units. A cross-currency trade pairing `u` USDC-leg base units with `e`
+EURC-leg base units is rate-consistent iff
+
+```
+e * fxDenominator == u * fxNumerator
+```
+
+— pure bigint cross-multiplication; no division exists anywhere in the
+protocol, and both tokens are 6-decimal on Arc so there is no decimal-skew
+term. An FX trade is a *pair* of IOUs — one on each hub, opposite directions
+between the same two parties — sharing the same `ref`; verifiers
+(`verifyPvPProposal`) pair by `ref` and check cross-multiplication **per
+pair**. The rate check is explicitly NOT applicable to net deltas: a round
+mixes FX flows with ordinary same-currency flows, so
+`usdcDelta·fxDen == −eurcDelta·fxNum` does not hold in general and must not
+be asserted, on-chain or off. The router verifies signatures, never
+economics — off-chain compute, on-chain enforce.
+
+### arc-stablecoin-fx tie-in
+
+The per-round rate is agreed in the same amount-pair form the official
+`circlefin/arc-stablecoin-fx` sample's App Kit swap quotes use (`amountIn`
+with an `estimatedOutput` amount — e.g. 1 USDC → 0.989589 EURC becomes
+`fxNumerator = 989_589`, `fxDenominator = 1_000_000`). A production
+coordinator would source the pair from an App Kit `estimateSwap` quote; the
+sample itself is a Next.js/Supabase app not consumable from a
+dependency-free viem SDK, so the demo **mirrors the sample's quote data
+shape** as its rate source — this shape-mirror is the sanctioned D-06
+fallback, documented here as such. The rate is *agreed, not oracle-derived*:
+unanimous consent over the PvPRound digest is what bounds rate manipulation
+— everyone whose delta depends on it signed it.
+
+### Standing consent (no deadline, by design)
+
+The PvPRound has no deadline field, deliberately. The legs — not the wrapper
+— are the replayable objects: a fully-signed bundle at hub nonces that never
+advance remains executable indefinitely, exactly the base protocol's
+documented standing-consent property for leg consents. A PvPRound-level
+deadline would give false comfort while binding nothing the hubs check.
+Either hub's nonce advancing (by any round) permanently invalidates the
+bundle.
 
 ## Explicit non-goals
 
@@ -543,3 +672,12 @@ balance. Snapshot persisted in `contracts/.gas-snapshot`.
 > races the never-pausable `withdraw`), gated by on-chain staleness and the
 > L-bounded coverage rule, with uncalibrated K/RING/L labeled as such. See
 > THREAT-MODEL.md for the redemption rows.
+
+> Superseded: "no cross-currency rounds" held — and still holds — at the
+> hub level: one hub clears exactly one token, and no hub was changed. The
+> [Cross-currency PvP rounds](#cross-currency-pvp-rounds) section above
+> supersedes it at the composition layer: a stateless `PvPRouter` settles a
+> USDC leg and a EURC leg atomically in one transaction under union-signed
+> PvPRound consent, with the agreed FX rate bound into the digest and the
+> single-leg-extraction residual stated plainly. See THREAT-MODEL.md for
+> the PvP rows.

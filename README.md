@@ -36,7 +36,10 @@ Netting fixes that other axis. Obligations accumulate off-chain as signed IOUs
 (a tab, with a limit); a round cancels offsetting *and cyclic* flows (A→B→C→A)
 and settles only residuals from pre-posted collateral. Working capital drops
 from turnover-sized to exposure-sized — the reason DTCC and CLS exist. And a
-hub clears **any ERC-20**: deploy one for USDC, one for EURC.
+hub clears **any ERC-20**: deploy one for USDC, one for EURC. Netting
+compresses obligations *within* a token; the `PvPRouter` composes two hubs
+*across* tokens — USDC and EURC legs settling atomically in one transaction,
+a miniature CLS.
 
 |                        | Gateway / x402 nanopayments | arclear netting            |
 | ---------------------- | --------------------------- | -------------------------- |
@@ -196,6 +199,16 @@ calibration deferred to the Phase 3 checkpoint; set these as `HUB_V2_USDC` /
 | USDC `0x3600…0000` | [`0x3b9a9617b91589a15A14122183e6305D9F0a5a16`](https://testnet.arcscan.app/address/0x3b9a9617b91589a15A14122183e6305D9F0a5a16) | source verified ✓ |
 | EURC `0x89B5…D72a` | [`0xECcCD7E43B0Caf4D81420483dEE20E5e258FB85E`](https://testnet.arcscan.app/address/0xECcCD7E43B0Caf4D81420483dEE20E5e258FB85E) | source verified ✓ |
 
+**Cross-currency PvP router** (`PvPRouter` — atomic USDC+EURC
+payment-vs-payment rounds against the two current V2 hubs above, which it
+pins as constructor immutables; stateless, holds no funds; set as
+`PVP_ROUTER` in `.env`; spec in [PROTOCOL.md → Cross-currency PvP
+rounds](docs/PROTOCOL.md#cross-currency-pvp-rounds)):
+
+| contract | address | status |
+| -------- | ------- | ------ |
+| PvPRouter (hubUSDC `0x3b9a…5a16` · hubEURC `0xECcC…B85E`) | [`0x8287dD162e73f1a1DD15774dDc8A4137a2d3fE8c`](https://testnet.arcscan.app/address/0x8287dD162e73f1a1DD15774dDc8A4137a2d3fE8c) | source verified ✓ |
+
 **Arclear Net v2 — Phase-1 hubs** (threshold consent only, no merkle
 manifests or redemption; superseded by the hubs above but still live
 on-chain):
@@ -311,8 +324,10 @@ In order, per the sweep data:
    `redeemIOU` recovery against an unresponsive debtor's collateral
    (K/RING/L uncalibrated, labeled as such — calibration is the next
    checkpoint).
-3. **Cross-currency rounds** — USDC and EURC legs settling atomically
-   (payment-vs-payment, a miniature CLS on Arc).
+3. **Cross-currency rounds** — ✅ shipped (`PvPRouter`, live on Arc Testnet
+   above): USDC and EURC legs settling atomically (payment-vs-payment, a
+   miniature CLS on Arc), with the agreed per-round FX rate signed into the
+   union's PvPRound consent digest.
 
 ## For Arc Open Source Showcase reviewers
 
