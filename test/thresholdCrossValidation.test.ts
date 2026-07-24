@@ -149,7 +149,11 @@ async function runSeed(
     // consent signing or verification broke (a diagnosable failure, not a
     // tolerance case).
     expect(attempt.pass1.refused).toEqual([]);
-    expect(attempt.excluded.length).toBe(record.excluded.length);
+    // Excluded-set MEMBERSHIP through the remap, not just size (WR-04): an
+    // aborted round consumes nothing, so a same-size wrong-membership
+    // divergence would leave both pools identical and pass every later check.
+    const expectedExcluded = record.excluded.map((a) => remap.get(a)!.toLowerCase()).sort();
+    expect(attempt.excluded.map((a) => a.toLowerCase()).sort()).toEqual(expectedExcluded);
     if (stats && attempt.excluded.length > 0) stats.exclusions++;
 
     if (attempt.outcome !== "settled") continue;
@@ -158,6 +162,18 @@ async function runSeed(
     expect(attempt.result.settledVolume).toBe(record.settledVolume);
     expect(attempt.result.grossVolume).toBe(record.grossVolume);
     expect(attempt.proposal.consumedIds.length).toBe(record.consumedCount);
+
+    // Per-member delta equality through the remap (WR-04): the settled
+    // round's exact per-member allocation, not just its aggregate volumes.
+    const actualDeltas = new Map<string, bigint>();
+    attempt.result.participants.forEach((member, i) =>
+      actualDeltas.set(member.toLowerCase(), attempt.result.deltas[i]),
+    );
+    const expectedDeltas = new Map<string, bigint>();
+    for (const [member, delta] of record.deltas) {
+      expectedDeltas.set(remap.get(member)!.toLowerCase(), delta);
+    }
+    expect(actualDeltas).toEqual(expectedDeltas);
 
     modelCumulative += record.settledVolume;
     realCumulative += attempt.result.settledVolume;
