@@ -86,23 +86,45 @@ export async function verifyPvPConsent(
 
 /** Union of two strictly-ascending address lists, ascending — lowercase
  *  comparisons, checksummed output preserved. Same spec the router's on-chain
- *  sorted merge implements. */
+ *  sorted merge implements, INCLUDING its precondition (WR-03): the merged
+ *  stream must be strictly ascending — which holds iff BOTH inputs are — and
+ *  the zero address is rejected. Violations throw, exactly where the router
+ *  would revert UnionNotStrictlyAscending. */
 export function unionParticipants(a: Address[], b: Address[]): Address[] {
   const out: Address[] = [];
   let i = 0;
   let j = 0;
+  // Mirrors _unionOf's `prev` starting at address(0): a zero-address entry
+  // fails `next <= prev` immediately, as does any non-ascending step
+  // (unsorted input or an in-list duplicate). Fixed-width lowercase hex
+  // compares like the EVM's uint160 comparison.
+  let prev = "0x" + "0".repeat(40);
   while (i < a.length || j < b.length) {
     const x = i < a.length ? a[i].toLowerCase() : undefined;
     const y = j < b.length ? b[j].toLowerCase() : undefined;
+    let pushed: Address;
+    let next: string;
     if (y === undefined || (x !== undefined && x < y)) {
-      out.push(a[i++]);
+      pushed = a[i++];
+      next = x as string;
     } else if (x === undefined || y < x) {
-      out.push(b[j++]);
+      pushed = b[j++];
+      next = y;
     } else {
-      out.push(a[i]);
+      // Same address in both legs: one union entry.
+      pushed = a[i];
+      next = x as string;
       i++;
       j++;
     }
+    if (next <= prev) {
+      throw new Error(
+        `union not strictly ascending at ${pushed}: inputs must be strictly ascending and ` +
+          `zero-address-free — the router would revert UnionNotStrictlyAscending`,
+      );
+    }
+    prev = next;
+    out.push(pushed);
   }
   return out;
 }

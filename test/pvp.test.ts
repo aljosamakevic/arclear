@@ -145,6 +145,20 @@ describe("unionParticipants", () => {
     );
   });
 
+  it("WR-03: rejects unsorted input, in-list duplicates, and the zero address (matches _unionOf)", () => {
+    const [p0, p1] = POOL;
+    const ZERO = ("0x" + "0".repeat(40)) as Address;
+    // Non-ascending merged stream: unsorted input list.
+    expect(() => unionParticipants([p1, p0], [])).toThrow(/strictly ascending/);
+    expect(() => unionParticipants([], [p1, p0])).toThrow(/strictly ascending/);
+    // An in-list duplicate is a non-strict step (cross-list duplicates are
+    // legal — same member on both legs merges to one union entry).
+    expect(() => unionParticipants([p0, p0], [])).toThrow(/strictly ascending/);
+    // The zero address fails against the address(0) seed, exactly like the
+    // router's UnionNotStrictlyAscending.
+    expect(() => unionParticipants([ZERO, p0], [])).toThrow(/strictly ascending/);
+    expect(() => unionParticipants([], [ZERO])).toThrow(/strictly ascending/);
+  });
 });
 
 describe("rateConsistent", () => {
