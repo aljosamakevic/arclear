@@ -144,6 +144,7 @@ describe("unionParticipants", () => {
       }),
     );
   });
+
 });
 
 describe("rateConsistent", () => {
@@ -295,6 +296,63 @@ describe("verifyPvPProposal", () => {
     );
     expect(check.ok).toBe(false);
     expect(check.reason).toMatch(/direction/);
+  });
+
+  it("CR-01 regression: refuses a bundle consuming the paying USDC IOU while the receiving EURC counter-IOU is stripped (quorum padded)", async () => {
+    const at = { now: NOW };
+    const carol = privateKeyToAccount(("0x" + "33".repeat(32)) as Hex);
+    const dave = privateKeyToAccount(("0x" + "44".repeat(32)) as Hex);
+    // Alice's trade: 1,000,000 USDC base units out for 989,589 EURC base
+    // units back, one shared ref — the reviewer's reproduced attack shape.
+    const fxU = await signIou(
+      HUB_USDC, iou(alice.address, bob.address, FX_DEN, FX_REF), alice, undefined, at,
+    );
+    const fxE = await signIou(
+      HUB_EURC, iou(bob.address, alice.address, FX_NUM, FX_REF), bob, undefined, at,
+    );
+    // Malicious coordinator: consume alice's paying IOU on the USDC leg but
+    // OMIT her receiving IOU from the EURC leg, padding that leg with an
+    // unrelated dave→carol flow to keep quorum.
+    const pad = await signIou(
+      HUB_EURC, iou(dave.address, carol.address, 10n, PLAIN_REF), dave, undefined, at,
+    );
+    const usdcLeg = buildProposal(HUB_USDC, 0n, net([fxU], { now: NOW }));
+    const eurcLeg = buildProposal(HUB_EURC, 0n, net([pad], { now: NOW }));
+    const proposal = buildPvPProposal(ROUTER, usdcLeg, eurcLeg, FX_NUM, FX_DEN);
+    // Attack preconditions hold: alice is in the USDC leg, stripped from the
+    // EURC leg, and her counter-IOU is not consumed anywhere.
+    const aliceLc = alice.address.toLowerCase();
+    expect(proposal.usdcLeg.participants.some((p) => p.toLowerCase() === aliceLc)).toBe(true);
+    expect(proposal.eurcLeg.participants.some((p) => p.toLowerCase() === aliceLc)).toBe(false);
+    expect(proposal.eurcLeg.consumedIds.map((i) => i.toLowerCase())).not.toContain(
+      fxE.id.toLowerCase(),
+    );
+    // Pre-fix this returned { ok: true } — alice would sign away her USDC
+    // with no EURC coming in. The verdict must flip to a refusal-as-data
+    // naming the missing counter-leg consumption.
+    const check = verifyPvPProposal(
+      ROUTER, HUB_USDC, HUB_EURC, proposal, [fxU], [fxE], alice.address,
+      { now: NOW },
+    );
+    expect(check.ok).toBe(false);
+    expect(check.reason).toMatch(/inclusion asymmetry/);
+    expect(check.reason).toMatch(/EURC counter-IOU is missing from the eurc leg/);
+    expect(check.reason).toContain(FX_REF);
+
+    // Mirror direction: EURC side consumed, USDC counter-IOU stripped.
+    const padU = await signIou(
+      HUB_USDC, iou(dave.address, carol.address, 10n, PLAIN_REF), dave, undefined, at,
+    );
+    const usdcLeg2 = buildProposal(HUB_USDC, 0n, net([padU], { now: NOW }));
+    const eurcLeg2 = buildProposal(HUB_EURC, 0n, net([fxE], { now: NOW }));
+    const proposal2 = buildPvPProposal(ROUTER, usdcLeg2, eurcLeg2, FX_NUM, FX_DEN);
+    const check2 = verifyPvPProposal(
+      ROUTER, HUB_USDC, HUB_EURC, proposal2, [fxU], [fxE], alice.address,
+      { now: NOW },
+    );
+    expect(check2.ok).toBe(false);
+    expect(check2.reason).toMatch(/inclusion asymmetry/);
+    expect(check2.reason).toMatch(/USDC counter-IOU is missing from the usdc leg/);
   });
 
   it("passes per-leg WR-06 opts through: wrong expectedRoundNonce on one leg refuses", async () => {

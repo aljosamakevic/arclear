@@ -624,7 +624,11 @@ protocol, and both tokens are 6-decimal on Arc so there is no decimal-skew
 term. An FX trade is a *pair* of IOUs — one on each hub, opposite directions
 between the same two parties — sharing the same `ref`; verifiers
 (`verifyPvPProposal`) pair by `ref` and check cross-multiplication **per
-pair**. The rate check is explicitly NOT applicable to net deltas: a round
+pair**, plus **inclusion symmetry**: both sides of a pair must be jointly
+consumed or jointly deferred by the two proposed legs, so a coordinator can
+never settle one side of a member's trade while stripping the counter-IOU
+from the other leg (THREAT-MODEL row 27). The rate check is explicitly NOT
+applicable to net deltas: a round
 mixes FX flows with ordinary same-currency flows, so
 `usdcDelta·fxDen == −eurcDelta·fxNum` does not hold in general and must not
 be asserted, on-chain or off. The router verifies signatures, never

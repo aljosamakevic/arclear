@@ -218,6 +218,10 @@ export function verifyPvPProposal(
   // and would refuse honest rounds.
   const usdcByRef = byRef(myIousUsdc);
   const eurcByRef = byRef(myIousEurc);
+  // Leg-manifest id sets for the CR-01 inclusion-symmetry check below —
+  // "lowercase id -> present in that leg's consumedIds".
+  const usdcConsumed = new Set(proposal.usdcLeg.consumedIds.map((i) => i.toLowerCase()));
+  const eurcConsumed = new Set(proposal.eurcLeg.consumedIds.map((i) => i.toLowerCase()));
   for (const [ref, uList] of usdcByRef) {
     const eList = eurcByRef.get(ref);
     if (!eList) continue;
@@ -242,6 +246,27 @@ export function verifyPvPProposal(
       return {
         ok: false,
         reason: `FX ref ${ref} rate inconsistency: ${u.amount} USDC vs ${e.amount} EURC does not cross-multiply to ${proposal.fxNumerator}/${proposal.fxDenominator}`,
+      };
+    }
+    // CR-01 inclusion symmetry: a rate-consistent, direction-swapped pair is
+    // only safe if BOTH sides are jointly consumed or jointly deferred by the
+    // proposed legs. Without this, a coordinator can consume the member's
+    // paying IOU on one leg while stripping their receiving IOU from the
+    // other (padding that leg with unrelated paper to keep quorum) — the
+    // per-leg verifyProposal above never runs for a leg the member was
+    // stripped from, so this cross-leg check is the ONLY guard.
+    const uIn = usdcConsumed.has(uList[0].id.toLowerCase());
+    const eIn = eurcConsumed.has(eList[0].id.toLowerCase());
+    if (uIn !== eIn) {
+      const [inSide, outSide, outLeg] = uIn
+        ? (["USDC", "EURC", "eurc"] as const)
+        : (["EURC", "USDC", "usdc"] as const);
+      return {
+        ok: false,
+        reason:
+          `FX ref ${ref} inclusion asymmetry: the ${inSide} side is consumed by its leg but the ` +
+          `${outSide} counter-IOU is missing from the ${outLeg} leg's consumedIds — one side of ` +
+          `the trade would settle without its twin`,
       };
     }
   }
