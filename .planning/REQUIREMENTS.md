@@ -30,8 +30,8 @@ Requirements for the v2 milestone (this roadmap). Derived 1:1 from `docs/V2-BRIE
 
 ### Cross-Currency PvP (brief Phase 6)
 
-- [ ] **PVP-01**: USDC + EURC legs settle atomically in a payment-vs-payment round (miniature CLS)
-- [ ] **PVP-02**: An agreed per-round FX rate is signed into the consent digest; ties to the official `arc-stablecoin-fx` sample
+- [x] **PVP-01**: USDC + EURC legs settle atomically in a payment-vs-payment round (miniature CLS)
+- [x] **PVP-02**: An agreed per-round FX rate is signed into the consent digest; ties to the official `arc-stablecoin-fx` sample
 
 ## v2 Requirements
 
@@ -83,8 +83,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | WATR-03 | — | Removed (2026-07-24) |
 | MEMB-01 | — | Removed (2026-07-24) |
 | MEMB-02 | — | Removed (2026-07-24) |
-| PVP-01 | Phase 4 | Pending |
-| PVP-02 | Phase 4 | Pending |
+| PVP-01 | Phase 4 | Complete |
+| PVP-02 | Phase 4 | Complete |
 
 **Coverage:**
 
