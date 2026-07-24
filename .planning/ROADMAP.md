@@ -123,7 +123,7 @@ Note: Phases 1+2 complete = shippable "Arclear Net v2" release (showcase resubmi
 Plans:
 **Wave 1**
 
-- [ ] 03-01-PLAN.md — Pure exclude-and-recompute threshold model in `demo/thresholdModel.ts` mirroring `attemptRound`, with fast-check invariant suite (wave 1)
+- [x] 03-01-PLAN.md — Pure exclude-and-recompute threshold model in `demo/thresholdModel.ts` mirroring `attemptRound`, with fast-check invariant suite (wave 1)
 
 **Wave 2** *(blocked on Wave 1)*
 
@@ -157,5 +157,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4.
 |-------|----------------|--------|-----------|
 | 1. Threshold Consent | 5/5 | Complete    | 2026-07-22 |
 | 2. Merkle Manifests & IOU Redemption | 8/8 | Complete    | 2026-07-24 |
-| 3. Calibration Checkpoint | 0/3 | Not started | - |
+| 3. Calibration Checkpoint | 1/3 | In Progress|  |
 | 4. Cross-Currency PvP Rounds | 0/TBD | Not started | - |
