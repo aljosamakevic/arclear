@@ -6,6 +6,10 @@ this file (`@docs/V2-BRIEF.md`). Every question GSD asks should be answerable
 from here; the "Answers for GSD's questions" section at the bottom covers the
 usual ones. Phases below map 1:1 onto a GSD roadmap.
 
+> **Messaging note:** this is an internal roadmap document. Public-facing
+> benefit framing lives in the README and `docs/CONCEPTS.md` — keep pitch
+> language there, not here, so the two don't drift.
+
 ---
 
 ## 1. Where v1 stands (context for a fresh session)
