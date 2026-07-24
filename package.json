@@ -1,11 +1,44 @@
 {
   "name": "arclear",
-  "version": "0.1.0",
-  "description": "Obligation-netting clearinghouse primitive for Arc — 100 micropayments, 1 settlement.",
+  "version": "2.0.0",
+  "description": "Permissionless multilateral obligation-netting clearinghouse primitive for any ERC-20 on Arc — 100 micropayments, 1 settlement.",
+  "keywords": [
+    "arc",
+    "clearing",
+    "netting",
+    "clearinghouse",
+    "settlement",
+    "eip-712",
+    "usdc",
+    "eurc",
+    "pvp",
+    "viem",
+    "erc20",
+    "stablecoin"
+  ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/aljosamakevic/arclear.git"
+  },
   "type": "module",
-  "main": "src/index.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "docs/CONCEPTS.md"
+  ],
+  "sideEffects": false,
   "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepublishOnly": "npm run build && npm test",
     "test": "vitest run",
     "test:contracts": "cd contracts && forge test -vvv",
     "fixture": "tsx test/genFixture.ts",
