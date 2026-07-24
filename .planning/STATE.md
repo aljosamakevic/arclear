@@ -4,8 +4,8 @@ milestone: v1.0
 milestone_name: milestone
 status: executing
 stopped_at: Phase 2 context gathered (auto)
-last_updated: "2026-07-24T11:09:05.943Z"
-last_activity: 2026-07-24 -- Phase 3 planning complete
+last_updated: "2026-07-24T11:09:06.852Z"
+last_activity: 2026-07-24 -- Phase 3 execution started
 progress:
   total_phases: 4
   completed_phases: 2
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-07-22)
 
 **Core value:** A CCP is defined by operating *through* a member failure: the system must keep settling when members stall or default, with every risk mechanism legible, invariant-tested, and honest about its calibration status.
-**Current focus:** Phase 3 — calibration checkpoint (brief checkpoint)
+**Current focus:** Phase 3 — Calibration Checkpoint (brief checkpoint)
 
 ## Current Position
 
-Phase: 3
-Plan: Not started
-Status: Ready to execute
-Last activity: 2026-07-24 -- Phase 3 planning complete
+Phase: 3 (Calibration Checkpoint (brief checkpoint)) — EXECUTING
+Plan: 1 of 3
+Status: Executing Phase 3
+Last activity: 2026-07-24 -- Phase 3 execution started
 
 Progress: [░░░░░░░░░░] 0%
 

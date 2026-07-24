@@ -38,7 +38,9 @@ export interface FlowParams {
 
 const FUTURE = 4_102_444_800n;
 
-function addr(i: number): Address {
+/** Synthetic member address for index i — shared with thresholdModel so the
+ * flow generator and the availability model key the same participants. */
+export function addr(i: number): Address {
   return `0x${(i + 1).toString(16).padStart(40, "0")}` as Address;
 }
 
