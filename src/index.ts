@@ -5,4 +5,5 @@ export * from "./netting.js";
 export * from "./merkle.js";
 export * from "./round.js";
 export * from "./creditCap.js";
+export * from "./pvp.js";
 export * from "./client.js";
