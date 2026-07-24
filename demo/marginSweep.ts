@@ -53,6 +53,12 @@ const argv = process.argv.slice(2);
 const quick = argv.includes("--quick");
 const roundsIdx = argv.indexOf("--rounds");
 const requestedRounds = roundsIdx !== -1 ? Number(argv[roundsIdx + 1]) : 64;
+// Fail fast BEFORE any compute or CSV write: NaN (missing/non-numeric value)
+// or a non-positive count would defeat the Math.max floor (Math.max(64, NaN)
+// is NaN) and silently overwrite the committed CSV with all-zero rows (WR-02).
+if (roundsIdx !== -1 && (!Number.isInteger(requestedRounds) || requestedRounds < 1)) {
+  throw new Error(`--rounds requires a positive integer, got ${argv[roundsIdx + 1]}`);
+}
 /** Rounds per simulated history. Hard floor 64 (>= 2x the largest lookback
  * N=32 so EWMA state matures) — the sanctioned runtime lever is the model's
  * internal settled-id pruning, never shorter histories. */

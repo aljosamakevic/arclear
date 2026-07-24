@@ -40,8 +40,15 @@ import { simulateThresholdHistory } from "./thresholdModel.js";
 const argv = process.argv.slice(2);
 const quick = argv.includes("--quick");
 const roundsIdx = argv.indexOf("--rounds");
+const requestedRounds = roundsIdx !== -1 ? Number(argv[roundsIdx + 1]) : 10;
+// Fail fast BEFORE any compute or CSV write: NaN (missing/non-numeric value)
+// or a non-positive count would silently overwrite the committed CSV with
+// all-zero rows (WR-02).
+if (roundsIdx !== -1 && (!Number.isInteger(requestedRounds) || requestedRounds < 1)) {
+  throw new Error(`--rounds requires a positive integer, got ${argv[roundsIdx + 1]}`);
+}
 /** Rounds per simulated history (overridable: --rounds N). */
-const ROUNDS_PER_SEED = roundsIdx !== -1 ? Number(argv[roundsIdx + 1]) : 10;
+const ROUNDS_PER_SEED = requestedRounds;
 /** D-03 locks 200 seeds/cell for the committed CSV; --quick is dev-only. */
 const SEEDS = quick ? 20 : 200;
 
