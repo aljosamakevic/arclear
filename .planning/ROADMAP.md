@@ -145,7 +145,30 @@ Note: The original DECISION GATE was resolved by user decision on 2026-07-24 (sk
   1. A cross-currency round settles both the USDC leg and the EURC leg atomically — both settle or neither does
   2. The agreed per-round FX rate is signed into the consent digest, tied to the official `arc-stablecoin-fx` sample
 
-**Plans**: TBD
+**Plans**: 7 plans
+
+Plans:
+**Wave 1** *(parallel)*
+
+- [ ] 04-01-PLAN.md — SDK PvP consent layer: PVP_TYPES/pvpDomain, PvPProposal, pvpDigest/sign/verify, unionParticipants, rateConsistent, verifyPvPProposal + vitest suite (wave 1)
+- [ ] 04-02-PLAN.md — PvPRouter.sol: stateless atomic router (immutable hub pair, union-sig verification, plain-call leg execution) + smoke tests (wave 1)
+
+**Wave 2** *(parallel, blocked on Wave 1)*
+
+- [ ] 04-03-PLAN.md — D-05 fixture pipeline: genFixture pvp_* keys, digest.json regen, TS fixture lock, PvPParity.t.sol deployCodeTo parity (wave 2)
+- [ ] 04-04-PLAN.md — Dual-hub PvPRoundBuilder harness, full revert matrix + single-leg documented-limitation test, measured gas + PvPRouterClient/abi module (wave 2)
+
+**Wave 3** *(blocked on Wave 2)*
+
+- [ ] 04-05-PLAN.md — Dual-hub demo bootstrap (setup/env/personas), arc-stablecoin-fx quote mirror, attemptPvPRound two-pass core + runPvPRound wrapper + in-flight guard (wave 3)
+
+**Wave 4** *(blocked on Wave 3)*
+
+- [ ] 04-06-PLAN.md — e2e both-or-neither on anvil (positive with FX-exact balances + gasUsed; negatives: aborted bundle + forced revert) + dashboard PvP badge (wave 4)
+
+**Wave 5** *(blocked on Wave 4)*
+
+- [ ] 04-07-PLAN.md — PROTOCOL/THREAT-MODEL/README/CONCEPTS docs, DeployPvPRouter.s.sol + Arc testnet deploy + verify, human-verify checkpoint (wave 5)
 
 
 ## Progress
@@ -158,4 +181,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4.
 | 1. Threshold Consent | 5/5 | Complete    | 2026-07-22 |
 | 2. Merkle Manifests & IOU Redemption | 8/8 | Complete    | 2026-07-24 |
 | 3. Calibration Checkpoint | 3/3 | Complete    | 2026-07-24 |
-| 4. Cross-Currency PvP Rounds | 0/TBD | Not started | - |
+| 4. Cross-Currency PvP Rounds | 0/7 | Planned | - |
