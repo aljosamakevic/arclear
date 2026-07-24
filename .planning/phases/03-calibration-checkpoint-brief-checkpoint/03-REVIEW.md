@@ -15,7 +15,11 @@ findings:
   warning: 5
   info: 4
   total: 9
-status: issues_found
+status: fixes_applied
+fixes_applied_at: 2026-07-24
+fixes:
+  fixed: 5
+  deferred_info: 4
 ---
 
 # Phase 3: Code Review Report
@@ -23,7 +27,7 @@ status: issues_found
 **Reviewed:** 2026-07-24
 **Depth:** standard
 **Files Reviewed:** 6 (plus read-only cross-checks of `demo/coordinator.ts`, `src/netting.ts`, `demo/flowModel.ts`, `demo/sweep.ts`, and both committed CSVs)
-**Status:** issues_found
+**Status:** fixes_applied (2026-07-24 — WR-01..WR-05 fixed, one atomic commit each; IN-01..IN-04 deferred; committed CSVs byte-identical; `npx tsc --noEmit` and all 83 vitest tests green after each fix)
 
 ## Narrative Findings (AI reviewer)
 
@@ -52,6 +56,8 @@ The findings below do not invalidate any committed number. None requires re-runn
 **Issue:** `percentile([], p)` and `mean([])` return `0`, so cells where no round ever settled report `median_realized_compression`, `median_worst_saving`, and both latency stats as `0.0000` — indistinguishable in-format from a genuine measured zero. This is not hypothetical: **16 committed rows at n=50, p=0.8 are fully imputed** (all stats 0.0000, abort_rate 1.0000, unsettled_fraction 1.0000). Adjacent p=0.8 / p=0.9 cells with abort_rate > 0.95 report medians computed over a small, survivorship-conditioned subset of seeds (only seeds with ≥1 settled round contribute to `compressions`/`worstSavings`) while the `seeds` column says 200. The doc's §2 "never read compression alone" warning and the paired abort/unsettled columns mitigate this for the cells CALIBRATION.md actually cites (none are imputed), but the CSV as a standalone artifact conflates "no data" with "zero". The margin CSV has the same conflation for `coverage_rate=0.0000`, though there `p99_debit=0` disambiguates, and §5 explicitly calls out the sparse cells — good.
 **Fix (no re-run needed):** (a) Add a sentence to CALIBRATION.md (§2 or a data-notes paragraph) stating that threshold rows with `abort_rate=1.0000` carry imputed 0.0000 statistics and that medians in high-abort cells are conditioned on seeds with ≥1 settled round; (b) optionally blank the stat fields of the 16 fully-empty rows (identifiable deterministically from abort_rate=1.0000 ∧ unsettled_fraction=1.0000 — a text edit, values unchanged elsewhere). **Adding a `settled_seeds` count column — the structurally better fix — would require re-running the ~50-min threshold sweep**; recommend the doc-side fix for this phase and the column on the next regeneration.
 
+**Outcome:** Fixed (commit `cd739ca`). Doc-side: CALIBRATION.md gained a "Data notes" paragraph naming the 16 fully imputed n=50/p=0.8 rows and the survivorship-conditioning of high-abort-cell medians. Code-side: `percentile([])`/`mean([])` in `demo/thresholdSweep.ts` now return `NaN` (rendered "NaN" by `toFixed`) so future regenerations mark empty samples instead of imputing 0.0000; the note records that the committed CSV predates the marker and stays byte-identical. Optional blanking of the 16 rows and the `settled_seeds` column deferred to the next regeneration (no-rerun constraint).
+
 ### WR-02: `--rounds` parsing accepts NaN and silently produces an all-zero CSV overwriting the committed artifact
 
 **File:** `demo/thresholdSweep.ts:42-44`; `demo/marginSweep.ts:54-62`
@@ -64,11 +70,15 @@ if (roundsIdx !== -1 && (!Number.isInteger(requestedRounds) || requestedRounds <
 }
 ```
 
+**Outcome:** Fixed (commit `abf0678`). Both sweep scripts now throw on NaN / non-integer / non-positive `--rounds` at parse time, before any compute or CSV write, exactly as suggested. Note: no `--seeds` flag exists in either script (seeds are fixed 200, `--quick` 20), so `--rounds` was the only numeric CLI arg to harden.
+
 ### WR-03: "excluded-paper latency" metric includes paper delayed by aborts and empty rounds, not just exclusion
 
 **File:** `demo/thresholdModel.ts:171-175`; `demo/thresholdSweep.ts:197-201` (header); `docs/CALIBRATION.md` §2 table + §4 first sentence
 **Issue:** `excludedLatencies` records latency for **every** IOU that settled ≥1 round after generation. When a round aborts, the entire pool carries — including paper of members who were online and never excluded; paper generated during an "empty" round also accrues latency with no exclusion involved. The model's own doc comment (thresholdModel.ts:69-71, "excluded/carried paper only") is honest, but the CSV column name `mean_excluded_latency_rounds` and CALIBRATION.md §4's "latency for the **excluded member's** paper" attribute the number specifically to exclusion. In the cells the doc cites, abort_rate runs 0.27–0.99, so abort carry-over — not exclusion of the measured IOU's parties — dominates the observation population. The number is computed correctly; its label overstates causal specificity.
 **Fix (doc/text-only, no re-run):** in CALIBRATION.md §4, change the attribution to "paper delayed by exclusion or an aborted/empty round (carry-over latency)" and rename the §2 column header accordingly. Optionally rename the CSV header field to `mean_carryover_latency_rounds` — a header-only text edit; the data rows are unchanged, so no re-run is required (keep the sweep script's HEADER constant in sync).
+
+**Outcome:** Fixed, text-only (commit `ccfd99e`). CALIBRATION.md §2 companion-table header and §4 attribution relabeled to carry-over latency (paper delayed by exclusion or an aborted/empty round), and the sweep's header comment updated to match. The CSV column names were deliberately NOT renamed (per the no-CSV-change constraint — committed data byte-identical); both the doc and the code comment now carry an explicit caveat that the historical `*_excluded_latency_rounds` names mean carry-over latency.
 
 ### WR-04: Cross-validation compares excluded-set size and consumed-id count, never membership or per-member deltas
 
@@ -81,6 +91,8 @@ expect(attempt.excluded.map((a) => a.toLowerCase()).sort()).toEqual(expectedExcl
 ```
 and, for settled rounds, compare `attempt.result.deltas` against `record.deltas` through the same remap (and consumed-id sets directly — ids are untouched by the remap).
 
+**Outcome:** Fixed (commit `421a868`). Excluded-set membership is now asserted through the remap (sorted lowercase equality) on every non-empty round — closing the aborted-round blind spot — and settled rounds assert full per-member delta `Map` equality with exact bigints. Consumed-id sets remain compared by count only: `ThresholdRoundRecord` does not expose the ids, and they are pinned indirectly by the exact delta maps, pool synchronization, and cumulative-volume equality; a direct set comparison would need a model-record extension, deferred. `npx vitest run test/thresholdCrossValidation.test.ts`: 5/5 green in ~40s with exact matching intact.
+
 ### WR-05: `simulateThresholdHistory` does not validate uptime schedule length — a short array silently yields an all-abort garbage history
 
 **File:** `demo/thresholdModel.ts:192`
@@ -92,6 +104,8 @@ if (Array.isArray(uptime) && uptime.length < rounds) {
 }
 ```
 
+**Outcome:** Fixed (commit `2eff0a8`). `simulateThresholdHistory` throws when an array uptime schedule is shorter than `rounds`, exactly as suggested. Model behavior for valid inputs unchanged; full 83-test suite green.
+
 ## Info
 
 ### IN-01: Percentile convention is upper-index nearest-rank (inherited verbatim from v1)
@@ -99,22 +113,30 @@ if (Array.isArray(uptime) && uptime.length < rounds) {
 **File:** `demo/thresholdSweep.ts:77-81`; `demo/marginSweep.ts:194-196`
 **Issue:** `s[Math.floor((p/100) * s.length)]` returns the upper of the two middle elements for an even-length "median" and sits one rank above standard nearest-rank for p10 (slightly anti-conservative for a lower-tail statistic). The formula is byte-identical to v1's `demo/sweep.ts:68-71`, so cross-sweep comparisons (the §2 v1-baseline column) are internally consistent — which matters more here than the convention itself. No action needed; worth a one-line methodology note if CALIBRATION.md ever gains an appendix.
 
+**Outcome:** Deferred (accepted as-is per the reviewer's own "no action needed" — v1 cross-sweep consistency is the priority).
+
 ### IN-02: Vacuous-run guard test depends on execution order via module-level mutable state
 
 **File:** `test/thresholdCrossValidation.test.ts:53, 210-215`
 **Issue:** The guard `it` reads `p09Stats` mutated by the two preceding `it`s. Under default vitest in-file ordering this works, and if the guard runs in isolation (`-t` filter) it fails loudly rather than passing vacuously — the safe failure direction — but order-coupled tests are fragile under future shuffling/sharding config.
 **Fix:** compute the stats inside the same `it` as the p=0.9 runs, or assert them at the end of each p=0.9 test.
 
+**Outcome:** Deferred — restructuring test ordering is beyond the WR fix scope and the failure direction is already safe (isolated run fails loudly, never passes vacuously).
+
 ### IN-03: 500 ms wall-clock consent window makes the cross-validation timing-sensitive on loaded machines
 
 **File:** `test/thresholdCrossValidation.test.ts:45, 101-111`
 **Issue:** Online members must produce a real EIP-712 signature within `WINDOW_MS = 500` of the shared deadline; on a heavily loaded CI box a slow signer would be misclassified as timed out. The failure is loud (excluded-count mismatch), never a silent pass, so this is a flake risk only. The offline-member rounds also add real waiting (~0.5–1 s per affected pass) to every `npm test` run — acceptable, but worth knowing it is wall-clock-bound.
+
+**Outcome:** Deferred — flake risk only, failure is loud; no code change made.
 
 ### IN-04: `memberAddr` in the model test duplicates `flowModel.addr`
 
 **File:** `test/thresholdModel.test.ts:15-18`
 **Issue:** Re-implements the synthetic address formula instead of importing `addr` (which `thresholdCrossValidation.test.ts` does import). Divergence would fail loudly, so it's duplication, not a correctness risk.
 **Fix:** `import { addr } from "../demo/flowModel.js";` and use `addr(i).toLowerCase()`.
+
+**Outcome:** Deferred — duplication only (divergence fails loudly); `test/thresholdModel.test.ts` was not touched by any WR fix, so left out of scope.
 
 ---
 
