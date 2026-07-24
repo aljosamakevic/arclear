@@ -13,14 +13,22 @@
  *   npm run e2e:testnet   (Arc Testnet, needs .env — see README)
  */
 import "./env.js";
-import { createWalletClient, http, keccak256, toHex, type Hex } from "viem";
+import { createWalletClient, http, keccak256, toHex, type Address, type Hex } from "viem";
 import { setup } from "./setup.js";
 import { simulateTraffic } from "./simulate.js";
 import { Coordinator } from "./coordinator.js";
 import { printReport, fmt } from "./report.js";
 import { signIou } from "../src/iou.js";
+import { net } from "../src/netting.js";
+import { signConsent } from "../src/round.js";
+import { signPvPConsent, verifyPvPProposal } from "../src/pvp.js";
 import { clearingHubV2Abi, clearingHubV2Bytecode } from "../src/abi/ClearingHubV2.js";
 import { clearingHubBytecode } from "../src/abi/ClearingHub.js";
+import { pvpRouterBytecode } from "../src/abi/PvPRouter.js";
+import type { HubClient } from "../src/client.js";
+import type { PvPProposal, SignedIou } from "../src/types.js";
+import { quoteToRate, sampleQuote } from "./fx.js";
+import { attemptPvPRound, fxTradePair, runPvPRound, type PvPConsentProvider } from "./pvp.js";
 
 const mode = process.argv.includes("--anvil") ? "anvil" : "testnet";
 const now = () => BigInt(Math.floor(Date.now() / 1000));
@@ -58,19 +66,24 @@ const coordinator = new Coordinator(
   env.chain.id,
 );
 
-/** Snapshot on-chain collateral for every persona. */
-async function snapshot(): Promise<Map<string, bigint>> {
+/** Snapshot on-chain collateral for every persona on one hub (default: USDC). */
+async function snapshot(hubClient: HubClient = env.hubClient): Promise<Map<string, bigint>> {
   const m = new Map<string, bigint>();
   for (const p of env.personas) {
-    m.set(p.account.address, await env.hubClient.collateral(p.account.address));
+    m.set(p.account.address, await hubClient.collateral(p.account.address));
   }
   return m;
 }
 
 /** Assert every persona's on-chain movement equals the round's engine delta, to the base unit. */
-async function assertDeltas(before: Map<string, bigint>, deltas: Record<string, string>, label: string) {
+async function assertDeltas(
+  before: Map<string, bigint>,
+  deltas: Record<string, string>,
+  label: string,
+  hubClient: HubClient = env.hubClient,
+) {
   for (const p of env.personas) {
-    const after = await env.hubClient.collateral(p.account.address);
+    const after = await hubClient.collateral(p.account.address);
     const actual = after - before.get(p.account.address)!;
     const expected = BigInt(deltas[p.account.address.toLowerCase()] ?? "0");
     check(
@@ -78,6 +91,13 @@ async function assertDeltas(before: Map<string, bigint>, deltas: Record<string, 
       `${label}: ${p.name.padEnd(11)} ${fmt(before.get(p.account.address)!)} → ${fmt(after)} (Δ ${fmt(actual)})`,
     );
   }
+}
+
+/** Two collateral snapshots are identical — same personas, same base units. */
+function mapsEqual(a: Map<string, bigint>, b: Map<string, bigint>): boolean {
+  if (a.size !== b.size) return false;
+  for (const [k, v] of a) if (b.get(k) !== v) return false;
+  return true;
 }
 
 // Shared per-pair nonce map: threading it through EVERY traffic batch keeps
@@ -365,6 +385,362 @@ check(
 await assertDeltas(beforeTail, tailRound.round.deltas, "tail round");
 printReport(tailRound.round, env.explorerTx);
 
+// ── PvP scenario (D-11, PVP-01): cross-currency both-or-neither ──────────────
+// FX trades between the designated FX personas (Trader pays USDC, Oracle pays
+// the rate-exact EURC back) mixed with ordinary same-currency flows on BOTH
+// hubs settle in ONE atomic router transaction. Anvil-only: testnet EURC hub
+// funding/deposits are the deploy-phase concern (04-05 note).
+if (mode === "anvil") {
+  console.log("[e2e] pvp scenario: atomic cross-currency settlement (both-or-neither) …");
+
+  // Pitfall-2 idiom applied to the router: prove the deployed router runs the
+  // local PvPRouter artifact (metadata-tail compare).
+  const routerCode = (await env.pub.getCode({ address: env.router })) ?? "0x";
+  check(tail(routerCode) === tail(pvpRouterBytecode), "router bytecode matches PvPRouter (metadata tail)");
+
+  const coordinatorEurc = new Coordinator(
+    env.hubEurc,
+    env.hubClientEurc,
+    env.pub,
+    env.personas,
+    env.relayerWallet,
+    env.chain.id,
+  );
+  // Per-pair nonce map for the EURC hub — kept separate from the USDC map so
+  // each hub's (pair, nonce) sequence stays independently legible.
+  const noncesEurc = new Map<string, bigint>();
+
+  const quote = sampleQuote();
+  const { fxNumerator, fxDenominator } = quoteToRate(quote);
+  const oracle = env.personas[2]; // FX trader: earns USDC, pays EURC
+  const trader = env.personas[3]; // FX trader: pays USDC, earns EURC
+
+  const nextNonce = (map: Map<string, bigint>, debtor: Address, creditor: Address): bigint => {
+    const key = `${debtor}->${creditor}`;
+    const n = (map.get(key) ?? 0n) + 1n;
+    map.set(key, n);
+    return n;
+  };
+
+  /** One FX trade: Trader pays `usdcAmount` USDC to Oracle, Oracle pays the
+   *  rate-exact EURC back — shared ref, per-hub pair-nonce sequences. */
+  const fxPair = (usdcAmount: bigint) =>
+    fxTradePair(
+      { account: trader.account, address: trader.account.address },
+      { account: oracle.account, address: oracle.account.address },
+      usdcAmount,
+      quote,
+      {
+        hubUsdc: env.hub,
+        hubEurc: env.hubEurc,
+        nonces: {
+          usdc: nextNonce(nonces, trader.account.address, oracle.account.address),
+          eurc: nextNonce(noncesEurc, oracle.account.address, trader.account.address),
+        },
+        expiry: now() + 3_600n,
+        chainId: env.chain.id,
+        now: now(),
+      },
+    );
+
+  /** Ordinary same-currency IOU on `hub` — mixed flows exercise the
+   *  Pitfall-6-safe design: rate checks are per FX pair, never per delta. */
+  async function ordinaryIou(
+    hub: Address,
+    map: Map<string, bigint>,
+    debtorIdx: number,
+    creditorIdx: number,
+    amount: bigint,
+  ): Promise<SignedIou> {
+    const debtor = env.personas[debtorIdx];
+    const creditor = env.personas[creditorIdx];
+    const pairKey = `${debtor.account.address}->${creditor.account.address}`;
+    const nonce = (map.get(pairKey) ?? 0n) + 1n;
+    map.set(pairKey, nonce);
+    return signIou(
+      hub,
+      {
+        debtor: debtor.account.address,
+        creditor: creditor.account.address,
+        amount,
+        nonce,
+        expiry: now() + 3_600n,
+        ref: keccak256(toHex(`pvp ordinary ${hub} ${debtor.name}->${creditor.name} #${nonce}`)) as Hex,
+      },
+      debtor.account,
+      env.chain.id,
+    );
+  }
+
+  /** One consistent view per PvP attempt: every provider verifies against the
+   *  SAME open-IOU snapshot, live per-hub nonces, and clock as the attempt. */
+  interface PvPView {
+    openU: SignedIou[];
+    openE: SignedIou[];
+    nonceU: bigint;
+    nonceE: bigint;
+    at: bigint;
+  }
+  const pvpView = async (): Promise<PvPView> => ({
+    openU: coordinator.openIous,
+    openE: coordinatorEurc.openIous,
+    nonceU: await env.hubClient.roundNonce(),
+    nonceE: await env.hubClientEurc.roundNonce(),
+    at: now(),
+  });
+
+  /** Honest union member: re-verifies both legs, every FX pair, and the bundle
+   *  digest from its own view — refuses as data on any mismatch (D-07). */
+  const honestPvP =
+    (persona: (typeof env.personas)[number], view: PvPView): PvPConsentProvider =>
+    async (proposal, excluded) => {
+      const verdict = verifyPvPProposal(
+        env.router,
+        env.hub,
+        env.hubEurc,
+        proposal,
+        view.openU,
+        view.openE,
+        persona.account.address,
+        {
+          now: view.at,
+          chainId: env.chain.id,
+          usdc: {
+            excluded,
+            settledIds: coordinator.settledIds,
+            redeemedIds: coordinator.redeemedIds,
+            expectedRoundNonce: view.nonceU,
+          },
+          eurc: {
+            excluded,
+            settledIds: coordinatorEurc.settledIds,
+            redeemedIds: coordinatorEurc.redeemedIds,
+            expectedRoundNonce: view.nonceE,
+          },
+        },
+      );
+      if (!verdict.ok) return { kind: "refusal", reason: `${persona.name}: ${verdict.reason}` };
+      const lc = persona.account.address.toLowerCase();
+      const inU = proposal.usdcLeg.participants.some((p) => p.toLowerCase() === lc);
+      const inE = proposal.eurcLeg.participants.some((p) => p.toLowerCase() === lc);
+      return {
+        kind: "consent" as const,
+        ...(inU
+          ? { usdcConsent: await signConsent(env.hub, proposal.usdcLeg, persona.account, env.chain.id) }
+          : {}),
+        ...(inE
+          ? { eurcConsent: await signConsent(env.hubEurc, proposal.eurcLeg, persona.account, env.chain.id) }
+          : {}),
+        pvpSignature: await signPvPConsent(env.router, proposal, persona.account, env.chain.id),
+      };
+    };
+
+  /** Providers for every persona (honest), with optional per-address overrides. */
+  const pvpProviders = (view: PvPView, overrides?: Map<string, PvPConsentProvider>) => {
+    const m = new Map<string, PvPConsentProvider>();
+    for (const p of env.personas) m.set(p.account.address.toLowerCase(), honestPvP(p, view));
+    for (const [k, v] of overrides ?? []) m.set(k, v);
+    return m;
+  };
+
+  /** Engine deltas ("lowercase -> base-unit string") recomputed locally per
+   *  hub — the e2e's own math, independent of anything the wrapper reports. */
+  const localDeltas = (
+    open: SignedIou[],
+    leg: { settledIds: Set<Hex>; redeemedIds: Set<Hex> },
+    at: bigint,
+  ): Record<string, string> => {
+    const result = net(open, { now: at, settledIds: leg.settledIds, redeemedIds: leg.redeemedIds });
+    const deltas: Record<string, string> = {};
+    result.participants.forEach((p, i) => {
+      deltas[p.toLowerCase()] = result.deltas[i].toString();
+    });
+    return deltas;
+  };
+
+  // ── Positive: both legs settle atomically with FX-exact balances ───────────
+  // Seed 2 FX trade pairs + ordinary same-currency flows on EACH hub, so both
+  // legs mix FX and non-FX paper.
+  const fx1 = await fxPair(3_000_000n);
+  const fx2 = await fxPair(2_000_000n);
+  coordinator.addIous([
+    fx1.usdc,
+    fx2.usdc,
+    await ordinaryIou(env.hub, nonces, 0, 1, 400_000n), // Crawler owes Summarizer (USDC, non-FX)
+    await ordinaryIou(env.hub, nonces, 4, 0, 250_000n), // Auditor owes Crawler (USDC, non-FX)
+  ]);
+  coordinatorEurc.addIous([
+    fx1.eurc,
+    fx2.eurc,
+    await ordinaryIou(env.hubEurc, noncesEurc, 1, 2, 200_000n), // Summarizer owes Oracle (EURC, non-FX)
+    await ordinaryIou(env.hubEurc, noncesEurc, 3, 4, 150_000n), // Trader owes Auditor (EURC, non-FX)
+  ]);
+
+  const view1 = await pvpView();
+  const beforeU1 = await snapshot();
+  const beforeE1 = await snapshot(env.hubClientEurc);
+  const expectedU = localDeltas(view1.openU, coordinator, view1.at);
+  const expectedE = localDeltas(view1.openE, coordinatorEurc, view1.at);
+
+  const pvpOut = await runPvPRound({
+    usdc: { hub: env.hub, reader: env.hubClient, state: coordinator },
+    eurc: { hub: env.hubEurc, reader: env.hubClientEurc, state: coordinatorEurc },
+    router: env.router,
+    routerClient: env.routerClient,
+    relayerWallet: env.relayerWallet,
+    pub: env.pub,
+    providers: pvpProviders(view1),
+    quote,
+    windowMs: 2_000,
+    now: view1.at,
+    chainId: env.chain.id,
+  });
+  check(pvpOut.outcome === "settled", `pvp round settled atomically (outcome=${pvpOut.outcome})`);
+  if (pvpOut.outcome !== "settled") {
+    console.error(`[e2e] FAIL — pvp round outcome=${pvpOut.outcome}`);
+    env.anvil?.kill();
+    process.exit(1);
+  }
+  check(pvpOut.rounds.usdc.passCount === 1, "pvp round settled in a single pass");
+  check((await env.hubClient.roundNonce()) === view1.nonceU + 1n, "USDC hub roundNonce advanced exactly 1");
+  check((await env.hubClientEurc.roundNonce()) === view1.nonceE + 1n, "EURC hub roundNonce advanced exactly 1");
+  await assertDeltas(beforeU1, expectedU, "pvp usdc leg");
+  await assertDeltas(beforeE1, expectedE, "pvp eurc leg", env.hubClientEurc);
+  check(
+    pvpOut.rounds.usdc.pvp?.fxNumerator === fxNumerator.toString() &&
+      pvpOut.rounds.eurc.pvp?.fxDenominator === fxDenominator.toString(),
+    `both hubs' round records carry the PvP rate tag (${fxNumerator}/${fxDenominator})`,
+  );
+
+  const pvpReceipt = await env.pub.getTransactionReceipt({ hash: pvpOut.txHash });
+  check(pvpReceipt.status === "success", `pvp router tx mined successfully (${pvpOut.txHash})`);
+  // A3 record: Arc's block gas limit is unverified — this measured figure is
+  // the evidence that demo-scale PvP fits comfortably under any plausible limit.
+  console.log(`[e2e] pvp gasUsed=${pvpReceipt.gasUsed}`);
+  printReport(pvpOut.rounds.usdc, env.explorerTx);
+  printReport(pvpOut.rounds.eurc, env.explorerTx);
+
+  // ── Negative (a): consent sabotage — the FX trader withholds consent ───────
+  // D-11 "withhold one consent": Trader refuses EVERY pass (a persistent
+  // refusal — a plain one-pass stall would just get them excluded and, with
+  // enough surviving flows, the round would settle without them: that is the
+  // liveness feature, not the sabotage). Here the EURC leg is FX-only, so the
+  // saboteur is structurally essential: excluding them from BOTH legs (D-09)
+  // drops the EURC leg below quorum and the WHOLE bundle aborts — the fully
+  // consentable USDC leg must not settle either.
+  console.log("[e2e] pvp negative (a): FX trader withholds consent → neither settles …");
+  const pairA = await fxPair(1_000_000n);
+  coordinator.addIous([
+    pairA.usdc,
+    await ordinaryIou(env.hub, nonces, 0, 1, 300_000n), // Crawler owes Summarizer — USDC quorum survives exclusion
+    await ordinaryIou(env.hub, nonces, 4, 0, 200_000n), // Auditor owes Crawler
+  ]);
+  coordinatorEurc.addIous([pairA.eurc]); // EURC leg is FX-only: the saboteur is essential
+
+  const refuse: PvPConsentProvider = async () => ({
+    kind: "refusal",
+    reason: `${trader.name}: sabotage — withholding PvP consent in every pass (D-11)`,
+  });
+  const viewA = await pvpView();
+  const snapUBeforeA = await snapshot();
+  const snapEBeforeA = await snapshot(env.hubClientEurc);
+
+  const outA = await runPvPRound({
+    usdc: { hub: env.hub, reader: env.hubClient, state: coordinator },
+    eurc: { hub: env.hubEurc, reader: env.hubClientEurc, state: coordinatorEurc },
+    router: env.router,
+    routerClient: env.routerClient,
+    relayerWallet: env.relayerWallet,
+    pub: env.pub,
+    providers: pvpProviders(viewA, new Map([[trader.account.address.toLowerCase(), refuse]])),
+    quote,
+    windowMs: 2_000,
+    now: viewA.at,
+    chainId: env.chain.id,
+  });
+  check(outA.outcome === "aborted", `sabotaged bundle aborted (outcome=${outA.outcome})`);
+  // Pitfall 7 (vacuous-pass trap): "neither settles" is asserted from CHAIN
+  // state — both hub nonces and every persona's collateral on both hubs —
+  // never from coordinator state alone, which would also pass if the tx was
+  // never sent.
+  check((await env.hubClient.roundNonce()) === viewA.nonceU, `USDC hub roundNonce unchanged (${viewA.nonceU})`);
+  check((await env.hubClientEurc.roundNonce()) === viewA.nonceE, `EURC hub roundNonce unchanged (${viewA.nonceE})`);
+  check(mapsEqual(snapUBeforeA, await snapshot()), "every persona's USDC-hub collateral unchanged (map-equal)");
+  check(mapsEqual(snapEBeforeA, await snapshot(env.hubClientEurc)), "every persona's EURC-hub collateral unchanged (map-equal)");
+
+  // ── Negative (b): forced on-chain revert — a mined tx that settles nothing ─
+  // The (a) paper is all still open (nothing settled); with everyone honest it
+  // builds a fully consented bundle. A recording submit captures the proposal
+  // and signature sets WITHOUT broadcasting; one EURC leg signature is then
+  // corrupted and the bundle submitted directly via the router client — the
+  // EURC hub's BadSignature revert must bubble through the router and unwind
+  // the USDC leg too, on a REAL node (complements the forge matrix, T-04-25).
+  console.log("[e2e] pvp negative (b): corrupted EURC leg signature → mined revert, nothing settles …");
+  const viewB = await pvpView();
+  const captured: {
+    proposal: PvPProposal;
+    legSigs: { usdc: Hex[]; eurc: Hex[] };
+    pvpSigs: Hex[];
+  }[] = [];
+  const outB = await attemptPvPRound({
+    usdc: {
+      ious: viewB.openU,
+      hub: env.hub,
+      expectedRoundNonce: viewB.nonceU,
+      settledIds: coordinator.settledIds,
+      redeemedIds: coordinator.redeemedIds,
+    },
+    eurc: {
+      ious: viewB.openE,
+      hub: env.hubEurc,
+      expectedRoundNonce: viewB.nonceE,
+      settledIds: coordinatorEurc.settledIds,
+      redeemedIds: coordinatorEurc.redeemedIds,
+    },
+    router: env.router,
+    fxNumerator,
+    fxDenominator,
+    providers: pvpProviders(viewB),
+    windowMs: 2_000,
+    now: viewB.at,
+    chainId: env.chain.id,
+    submit: async (proposal, legSigs, pvpSigs) => {
+      captured.push({ proposal, legSigs, pvpSigs });
+      return ("0x" + "00".repeat(32)) as Hex; // recorded, never broadcast
+    },
+  });
+  check(
+    outB.kind === "settled" && captured.length === 1,
+    "recording submit captured a fully consented bundle without broadcasting",
+  );
+  if (captured.length !== 1) {
+    console.error(`[e2e] FAIL — pvp negative (b) could not assemble a bundle (${outB.kind})`);
+    env.anvil?.kill();
+    process.exit(1);
+  }
+
+  // Corrupt one EURC leg signature: flip one nibble inside r — the structure
+  // stays valid, ecrecover yields a wrong signer, the hub reverts BadSignature.
+  const corruptSig = (sig: Hex): Hex =>
+    (sig.slice(0, 20) + (sig[20] === "a" ? "b" : "a") + sig.slice(21)) as Hex;
+  const { proposal: bundleB, legSigs: legSigsB, pvpSigs: pvpSigsB } = captured[0];
+  const corruptedLegSigs = {
+    usdc: legSigsB.usdc,
+    eurc: legSigsB.eurc.map((s, i) => (i === 0 ? corruptSig(s) : s)),
+  };
+  const snapUBeforeB = await snapshot();
+  const snapEBeforeB = await snapshot(env.hubClientEurc);
+  const txB = await env.routerClient.executePvP(env.relayerWallet, bundleB, corruptedLegSigs, pvpSigsB);
+  const receiptB = await env.pub.waitForTransactionReceipt({ hash: txB });
+  check(receiptB.status === "reverted", `corrupted bundle mined with status reverted (${txB})`);
+  check((await env.hubClient.roundNonce()) === viewB.nonceU, `USDC hub roundNonce unchanged after revert (${viewB.nonceU})`);
+  check((await env.hubClientEurc.roundNonce()) === viewB.nonceE, `EURC hub roundNonce unchanged after revert (${viewB.nonceE})`);
+  check(mapsEqual(snapUBeforeB, await snapshot()), "every persona's USDC-hub collateral unchanged after revert (map-equal)");
+  check(mapsEqual(snapEBeforeB, await snapshot(env.hubClientEurc)), "every persona's EURC-hub collateral unchanged after revert (map-equal)");
+} else {
+  console.log("[e2e] pvp scenario skipped on testnet — EURC hub funding/deposits are the deploy-phase concern");
+}
+
 // ── Verdict ──────────────────────────────────────────────────────────────────
 if (failures > 0) {
   console.error(`[e2e] FAIL — ${failures} assertion(s) failed`);
@@ -372,7 +748,10 @@ if (failures > 0) {
   process.exit(1);
 }
 console.log(
-  "[e2e] PASS — baseline settlement + liveness scenario (stall → exclude → re-settle → never twice) + redemption scenario (dark debtor → self-serve recovery → never nets again)",
+  "[e2e] PASS — baseline settlement + liveness scenario (stall → exclude → re-settle → never twice) + redemption scenario (dark debtor → self-serve recovery → never nets again)" +
+    (mode === "anvil"
+      ? " + pvp both-or-neither (atomic settle · sabotage abort · forced-revert atomicity)"
+      : ""),
 );
 
 env.anvil?.kill();
