@@ -493,6 +493,19 @@ export class Coordinator {
         providers.set(persona.account.address.toLowerCase(), (proposal, excluded) => {
           if (persona.stalled) return new Promise<ConsentOutcome>(() => {});
           return (async (): Promise<ConsentOutcome> => {
+            // WR-06 (second half): union of consumed ids across outstanding
+            // signed-but-unconfirmed consents, read LIVE at verification time.
+            // The demo's sequential single-round invariant keeps this empty
+            // in practice, but the wiring must exist — an integrator copying
+            // this reference for a concurrent coordinator inherits the
+            // double-settle guard instead of a dead branch.
+            // (Demo simplification: personas share the coordinator's
+            // pendingSubmission view; real members track their own consents.)
+            const pendingConsumedIds = new Set<Hex>(
+              (this.pendingSubmission?.consumedIds ?? []).map(
+                (id) => id.toLowerCase() as Hex,
+              ),
+            );
             const check = verifyProposal(
               this.hub,
               proposal,
@@ -508,6 +521,7 @@ export class Coordinator {
                 // (Demo simplification: personas share the coordinator's read;
                 // real members read the hub's roundNonce themselves.)
                 expectedRoundNonce: roundNonce,
+                pendingConsumedIds,
               },
             );
             if (!check.ok) return { kind: "refusal", reason: `${persona.name}: ${check.reason}` };
