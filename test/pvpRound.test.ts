@@ -2,15 +2,19 @@ import { describe, expect, it } from "vitest";
 import { privateKeyToAccount } from "viem/accounts";
 import type { Account } from "viem/accounts";
 import { numberToHex, type Address, type Hex } from "viem";
+import type { PublicClient, WalletClient } from "viem";
 import { signIou } from "../src/iou.js";
 import { signConsent } from "../src/round.js";
 import { rateConsistent, signPvPConsent, verifyPvPProposal } from "../src/pvp.js";
+import type { HubClient } from "../src/client.js";
 import { quoteToRate, sampleQuote } from "../demo/fx.js";
 import {
   attemptPvPRound,
   fxTradePair,
+  runPvPRound,
   type PvPConsentProvider,
 } from "../demo/pvp.js";
+import { Coordinator, type ExecutedRound } from "../demo/coordinator.js";
 import type { PvPProposal, SignedIou } from "../src/types.js";
 
 const HUB_U = "0x1111111111111111111111111111111111111111" as Address;
@@ -297,5 +301,193 @@ describe("attemptPvPRound", () => {
     if (out.kind !== "aborted") return;
     expect(out.pass1.refused.some((r) => /rate/.test(r.reason))).toBe(true);
     expect(calls.length).toBe(0);
+  });
+});
+
+describe("runPvPRound (chain-aware wrapper)", () => {
+  const TX = ("0x" + "cd".repeat(32)) as Hex;
+
+  function honestProviders(iousU: SignedIou[], iousE: SignedIou[]) {
+    return providersFor([
+      [alice, honest(alice, iousU, iousE)],
+      [bob, honest(bob, iousU, iousE)],
+      [carol, honest(carol, iousU, iousE)],
+      [dave, honest(dave, iousU, iousE)],
+    ]);
+  }
+
+  function fakeLegState(ious: SignedIou[]) {
+    return {
+      openIous: ious,
+      settledIds: new Set<Hex>(),
+      redeemedIds: new Set<Hex>(),
+      rounds: [] as ExecutedRound[],
+      held: [] as string[],
+      hold(reason: string) {
+        this.held.push(reason);
+      },
+      release() {
+        this.held.pop();
+      },
+    };
+  }
+
+  /** Stateful nonce reader: first read returns `first`, later reads `later`. */
+  function fakeReader(first: bigint, later?: bigint) {
+    let calls = 0;
+    return {
+      roundNonce: async () => {
+        calls++;
+        return calls === 1 ? first : (later ?? first);
+      },
+    };
+  }
+
+  it("records pending state for BOTH hubs before broadcasting and holds both hubs in flight", async () => {
+    const { iousU, iousE } = await baseScenario();
+    const stateU = fakeLegState(iousU);
+    const stateE = fakeLegState(iousE);
+    let pendingSeen:
+      | { usdc: { roundNonce: bigint; sentAtBlock: bigint }; eurc: { roundNonce: bigint } }
+      | undefined;
+    let pendingAtBroadcast = false;
+    let heldAtBroadcast = 0;
+    const out = await runPvPRound({
+      usdc: { hub: HUB_U, reader: fakeReader(NONCE_U), state: stateU },
+      eurc: { hub: HUB_E, reader: fakeReader(NONCE_E), state: stateE },
+      router: ROUTER,
+      routerClient: {
+        executePvP: async () => {
+          // WR-01: pending must already be recorded when the broadcast happens.
+          pendingAtBroadcast = pendingSeen !== undefined;
+          heldAtBroadcast = stateU.held.length + stateE.held.length;
+          return TX;
+        },
+      },
+      relayerWallet: {} as WalletClient,
+      pub: {
+        getBlockNumber: async () => 42n,
+        waitForTransactionReceipt: async () => ({ status: "success" }),
+      },
+      providers: honestProviders(iousU, iousE),
+      quote: QUOTE,
+      windowMs: WINDOW_MS,
+      now: NOW,
+      onPending: (p) => {
+        pendingSeen = p;
+      },
+    });
+    expect(out.outcome).toBe("settled");
+    expect(pendingAtBroadcast).toBe(true);
+    expect(pendingSeen?.usdc.roundNonce).toBe(NONCE_U);
+    expect(pendingSeen?.eurc.roundNonce).toBe(NONCE_E);
+    expect(pendingSeen?.usdc.sentAtBlock).toBe(42n);
+    // Pitfall 4: both hubs held while the bundle was in flight, released after.
+    expect(heldAtBroadcast).toBe(2);
+    expect(stateU.held.length).toBe(0);
+    expect(stateE.held.length).toBe(0);
+  });
+
+  it("classifies a failed submission from both chains' nonces (moved nonce = blocked)", async () => {
+    const { iousU, iousE } = await baseScenario();
+    const stateU = fakeLegState(iousU);
+    const stateE = fakeLegState(iousE);
+    const out = await runPvPRound({
+      usdc: { hub: HUB_U, reader: fakeReader(NONCE_U, NONCE_U + 1n), state: stateU },
+      eurc: { hub: HUB_E, reader: fakeReader(NONCE_E, NONCE_E), state: stateE },
+      router: ROUTER,
+      routerClient: { executePvP: async () => TX },
+      relayerWallet: {} as WalletClient,
+      pub: {
+        getBlockNumber: async () => 42n,
+        waitForTransactionReceipt: async () => ({ status: "reverted" }),
+      },
+      providers: honestProviders(iousU, iousE),
+      quote: QUOTE,
+      windowMs: WINDOW_MS,
+      now: NOW,
+    });
+    expect(out.outcome).toBe("blocked");
+    if (out.outcome !== "blocked") return;
+    expect(out.reason).toMatch(/concurrent/);
+    // Nothing folded on failure.
+    expect(stateU.settledIds.size).toBe(0);
+    expect(stateE.settledIds.size).toBe(0);
+    expect(stateU.rounds.length).toBe(0);
+    expect(stateE.rounds.length).toBe(0);
+  });
+
+  it("a reverted submission with unmoved nonces stays an abort (not blocked)", async () => {
+    const { iousU, iousE } = await baseScenario();
+    const stateU = fakeLegState(iousU);
+    const stateE = fakeLegState(iousE);
+    const out = await runPvPRound({
+      usdc: { hub: HUB_U, reader: fakeReader(NONCE_U, NONCE_U), state: stateU },
+      eurc: { hub: HUB_E, reader: fakeReader(NONCE_E, NONCE_E), state: stateE },
+      router: ROUTER,
+      routerClient: { executePvP: async () => TX },
+      relayerWallet: {} as WalletClient,
+      pub: {
+        getBlockNumber: async () => 42n,
+        waitForTransactionReceipt: async () => ({ status: "reverted" }),
+      },
+      providers: honestProviders(iousU, iousE),
+      quote: QUOTE,
+      windowMs: WINDOW_MS,
+      now: NOW,
+    });
+    expect(out.outcome).toBe("aborted");
+  });
+
+  it("hold blocks an ordinary Coordinator.runRound as a blocked-style result", async () => {
+    const c = new Coordinator(
+      HUB_U,
+      {} as unknown as HubClient,
+      {} as unknown as PublicClient,
+      [],
+      {} as unknown as WalletClient,
+    );
+    c.hold("PvP bundle in flight — ordinary rounds refused on both hubs");
+    const r = await c.runRound(NOW);
+    expect(r.outcome).toBe("aborted");
+    if (r.outcome !== "aborted") return;
+    expect(r.reason).toMatch(/in flight/);
+  });
+
+  it("a settled PvP run tags both hubs' rounds with the rate and folds per-hub settledIds", async () => {
+    const { iousU, iousE } = await baseScenario();
+    const stateU = fakeLegState(iousU);
+    const stateE = fakeLegState(iousE);
+    const out = await runPvPRound({
+      usdc: { hub: HUB_U, reader: fakeReader(NONCE_U), state: stateU },
+      eurc: { hub: HUB_E, reader: fakeReader(NONCE_E), state: stateE },
+      router: ROUTER,
+      routerClient: { executePvP: async () => TX },
+      relayerWallet: {} as WalletClient,
+      pub: {
+        getBlockNumber: async () => 42n,
+        waitForTransactionReceipt: async () => ({ status: "success" }),
+      },
+      providers: honestProviders(iousU, iousE),
+      quote: QUOTE,
+      windowMs: WINDOW_MS,
+      now: NOW,
+    });
+    expect(out.outcome).toBe("settled");
+    if (out.outcome !== "settled") return;
+    expect(out.txHash).toBe(TX);
+    expect(stateU.rounds.length).toBe(1);
+    expect(stateE.rounds.length).toBe(1);
+    expect(stateU.rounds[0].pvp).toEqual({ fxNumerator: "989589", fxDenominator: "1000000" });
+    expect(stateE.rounds[0].pvp).toEqual({ fxNumerator: "989589", fxDenominator: "1000000" });
+    // Pitfall 3: each hub's settledIds absorbs ONLY its own leg's ids.
+    expect(stateU.settledIds.size).toBe(stateU.rounds[0].iouCount);
+    expect(stateE.settledIds.size).toBe(stateE.rounds[0].iouCount);
+    const uIds = new Set(iousU.map((s) => s.id.toLowerCase()));
+    for (const id of stateU.settledIds) expect(uIds.has(id.toLowerCase())).toBe(true);
+    const eIds = new Set(iousE.map((s) => s.id.toLowerCase()));
+    for (const id of stateE.settledIds) expect(eIds.has(id.toLowerCase())).toBe(true);
+    const overlap = [...stateU.settledIds].filter((id) => stateE.settledIds.has(id));
+    expect(overlap.length).toBe(0);
   });
 });
