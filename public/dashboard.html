@@ -90,8 +90,8 @@
   <div class="panel" style="margin-top:14px">
     <h2>Executed rounds</h2>
     <table class="rounds" id="rounds">
-      <thead><tr><th>#</th><th>IOUs</th><th>Gross</th><th>Settled</th><th>Compression</th><th>Pass</th><th>Excluded</th><th>Tx</th></tr></thead>
-      <tbody><tr><td colspan="8" class="muted">No rounds executed yet.</td></tr></tbody>
+      <thead><tr><th>#</th><th>IOUs</th><th>Gross</th><th>Settled</th><th>Compression</th><th>Pass</th><th>Excluded</th><th>PvP</th><th>Tx</th></tr></thead>
+      <tbody><tr><td colspan="9" class="muted">No rounds executed yet.</td></tr></tbody>
     </table>
   </div>
 </div>
@@ -158,7 +158,12 @@ async function poll() {
         }).join(", ");
         const passCell = r.passCount === 2 ? `<span class="excl">2</span>` : `${r.passCount ?? 1}`;
         const exclCell = excludedNames ? `<span class="excl">${excludedNames}</span>` : `<span class="zero">—</span>`;
-        return `<tr><td>${r.roundNonce}</td><td>${r.iouCount}</td><td>${usd(g)}</td><td>${usd(st)}</td><td class="pos">${comp}</td><td>${passCell}</td><td>${exclCell}</td><td>${link}</td></tr>`;
+        // D-12 bound: PvP rounds get at most a badge (rate as num/den in the
+        // cell title) — no new panels, endpoints, or polling.
+        const pvpCell = r.pvp
+          ? `<span class="badge" title="fx rate ${r.pvp.fxNumerator}/${r.pvp.fxDenominator}">PvP</span>`
+          : `<span class="zero">—</span>`;
+        return `<tr><td>${r.roundNonce}</td><td>${r.iouCount}</td><td>${usd(g)}</td><td>${usd(st)}</td><td class="pos">${comp}</td><td>${passCell}</td><td>${exclCell}</td><td>${pvpCell}</td><td>${link}</td></tr>`;
       }).join("");
     }
 
