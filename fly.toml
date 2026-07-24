@@ -1,0 +1,20 @@
+# Live demo sandbox — Arclear dashboard on an in-container anvil chain.
+app = "arclear-demo"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # Keep one machine warm so the anvil bootstrap (spawn + deploy + fund, ~15s)
+  # doesn't run on a visitor's first request. State resets on machine restart —
+  # that is the intended sandbox behavior.
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"
