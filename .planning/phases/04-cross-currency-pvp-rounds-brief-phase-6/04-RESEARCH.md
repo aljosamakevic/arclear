@@ -484,7 +484,7 @@ assertEq(hubUSDC.collateral(alice), balBefore, "no balance moved");
 | A2 | Arc testnet has an observable public mempool (assumed adversarially, i.e., worst case) | Q2 | If mempool is private, the single-leg-extraction window shrinks to coordinator misbehavior only — the accept-and-document answer only gets stronger |
 | A3 | Arc testnet block gas limit comfortably exceeds the ~1.6M demo-scale PvP tx | Q6 | If tight, reduce testnet PvP manifest sizes (amountDivisor already reduces scale); e2e prints gasUsed for the record |
 
-## Open Questions
+## Open Questions (RESOLVED — both locked in plan 04-05)
 
 1. **Where does the PvP orchestration live — extend `Coordinator` or a sibling `PvPCoordinator`?**
    - What we know: `Coordinator` is single-hub with per-hub reconciliation state; `attemptRound` is chain-free and submit-injected.
