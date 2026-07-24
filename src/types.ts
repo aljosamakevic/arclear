@@ -45,3 +45,17 @@ export interface RoundProposal {
   digest: Hex;
   consumedIds: Hex[];
 }
+
+/** A cross-currency PvP bundle: two leg proposals bound to one agreed rate. */
+export interface PvPProposal {
+  /** USDC-hub leg — an ordinary round proposal on the USDC hub. */
+  usdcLeg: RoundProposal;
+  /** EURC-hub leg — an ordinary round proposal on the EURC hub. */
+  eurcLeg: RoundProposal;
+  /** EURC base units per `fxDenominator` USDC base units (rate numerator). */
+  fxNumerator: bigint;
+  /** USDC base units the numerator is quoted against (rate denominator). */
+  fxDenominator: bigint;
+  /** The EIP-712 PvPRound digest every union member signs. */
+  digest: Hex;
+}
