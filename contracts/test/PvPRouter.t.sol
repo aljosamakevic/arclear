@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
 
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
+
 import {PvPRoundBuilder} from "./utils/PvPRoundBuilder.sol";
+import {ClearingHubV2} from "../src/ClearingHubV2.sol";
 import {PvPRouter} from "../src/PvPRouter.sol";
 
 /// @dev PvP router suite over the dual-hub PvPRoundBuilder harness: smoke
@@ -178,5 +181,347 @@ contract PvPRouterTest is PvPRoundBuilder {
         assertEq(hubEURC.collateral(actors[0]), 1e6, "EURC creditor credited");
         assertEq(hubEURC.collateral(actors[1]), 1e6, "EURC creditor credited (2)");
         assertEq(hubEURC.collateral(actors[2]), 3e6, "EURC debtor debited");
+    }
+
+    // ------------------------------------------- executePvP: revert matrix
+    // Every test asserts the both-or-neither postcondition after the revert:
+    // both roundNonces unchanged plus representative collateral reads on
+    // BOTH hubs (the USDC debtor/creditor and the EURC debtor/creditor).
+
+    /// THE atomicity proof (Pitfall 1): the EURC leg fails signature checks
+    /// AFTER the USDC leg already executed inside the same call — revert
+    /// bubbling must undo the USDC leg's nonce advance and collateral moves.
+    function test_revert_executePvP_badLegSignature() public {
+        PvPBundle memory b = _simplePvP("bad-leg-sig");
+        // Valid-format signature by a non-participant over the right digest:
+        // ECDSA recovers cleanly to the wrong address -> BadSignature(0).
+        b.eurcLeg.signatures[0] = _signRound(
+            _keyOf(actors[4]),
+            hubEURC,
+            b.eurcLeg.nonce,
+            b.eurcLeg.participants,
+            b.eurcLeg.deltas,
+            b.eurcLeg.consumedIds
+        );
+
+        uint64 nU = hubUSDC.roundNonce();
+        uint64 nE = hubEURC.roundNonce();
+        uint256 cU0 = hubUSDC.collateral(actors[0]);
+        uint256 cU2 = hubUSDC.collateral(actors[2]);
+        uint256 cE1 = hubEURC.collateral(actors[1]);
+        uint256 cE3 = hubEURC.collateral(actors[3]);
+
+        vm.expectRevert(abi.encodeWithSelector(ClearingHubV2.BadSignature.selector, 0));
+        _submit(b);
+
+        assertEq(hubUSDC.roundNonce(), nU, "USDC nonce must not advance");
+        assertEq(hubEURC.roundNonce(), nE, "EURC nonce must not advance");
+        assertEq(hubUSDC.collateral(actors[0]), cU0, "USDC debtor collateral moved");
+        assertEq(hubUSDC.collateral(actors[2]), cU2, "USDC creditor collateral moved");
+        assertEq(hubEURC.collateral(actors[1]), cE1, "EURC debtor collateral moved");
+        assertEq(hubEURC.collateral(actors[3]), cE3, "EURC creditor collateral moved");
+    }
+
+    /// A leg validly signed over a FUTURE nonce passes digest binding and
+    /// union consent, then its hub reverts WrongRoundNonce — bubbling takes
+    /// the already-executed USDC leg with it.
+    function test_revert_executePvP_wrongLegNonce() public {
+        _fundAndDeposit(hubUSDC, usdc, actors[0], 10e6);
+        _fundAndDeposit(hubEURC, eurc, actors[1], 10e6);
+
+        address[] memory pU = new address[](3);
+        (pU[0], pU[1], pU[2]) = (actors[0], actors[1], actors[2]);
+        int256[] memory dU = new int256[](3);
+        (dU[0], dU[1], dU[2]) = (int256(-3e6), int256(1e6), int256(2e6));
+        address[] memory pE = new address[](3);
+        (pE[0], pE[1], pE[2]) = (actors[1], actors[2], actors[3]);
+        int256[] memory dE = new int256[](3);
+        (dE[0], dE[1], dE[2]) = (int256(-3e6), int256(1e6), int256(2e6));
+
+        // EURC leg signed over nonce current+1: stale-by-construction.
+        PvPBundle memory b = _bundle(
+            hubUSDC.roundNonce(),
+            pU,
+            dU,
+            _manifest(3, "wrong-nonce-usdc"),
+            hubEURC.roundNonce() + 1,
+            pE,
+            dE,
+            _manifest(3, "wrong-nonce-eurc"),
+            989_589,
+            1_000_000
+        );
+
+        uint64 nU = hubUSDC.roundNonce();
+        uint64 nE = hubEURC.roundNonce();
+        uint256 cU0 = hubUSDC.collateral(actors[0]);
+        uint256 cU2 = hubUSDC.collateral(actors[2]);
+        uint256 cE1 = hubEURC.collateral(actors[1]);
+        uint256 cE3 = hubEURC.collateral(actors[3]);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(ClearingHubV2.WrongRoundNonce.selector, nE, nE + 1)
+        );
+        _submit(b);
+
+        assertEq(hubUSDC.roundNonce(), nU, "USDC nonce must not advance");
+        assertEq(hubEURC.roundNonce(), nE, "EURC nonce must not advance");
+        assertEq(hubUSDC.collateral(actors[0]), cU0, "USDC debtor collateral moved");
+        assertEq(hubUSDC.collateral(actors[2]), cU2, "USDC creditor collateral moved");
+        assertEq(hubEURC.collateral(actors[1]), cE1, "EURC debtor collateral moved");
+        assertEq(hubEURC.collateral(actors[3]), cE3, "EURC creditor collateral moved");
+    }
+
+    /// Consented deltas stay valid signatures after a withdrawal — the EURC
+    /// debtor drains their collateral post-consent, so the second leg fails
+    /// the collateral check and the settled first leg must fully revert.
+    function test_revert_executePvP_insufficientCollateralSecondLeg() public {
+        PvPBundle memory b = _simplePvP("drained-eurc");
+        vm.prank(actors[1]);
+        hubEURC.withdraw(10e6); // drain the EURC debtor on the EURC hub only
+
+        uint64 nU = hubUSDC.roundNonce();
+        uint64 nE = hubEURC.roundNonce();
+        uint256 cU0 = hubUSDC.collateral(actors[0]);
+        uint256 cU2 = hubUSDC.collateral(actors[2]);
+        uint256 cE1 = hubEURC.collateral(actors[1]);
+        uint256 cE3 = hubEURC.collateral(actors[3]);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                ClearingHubV2.InsufficientCollateral.selector, actors[1], 0, 3e6
+            )
+        );
+        _submit(b);
+
+        assertEq(hubUSDC.roundNonce(), nU, "USDC nonce must not advance");
+        assertEq(hubEURC.roundNonce(), nE, "EURC nonce must not advance");
+        assertEq(hubUSDC.collateral(actors[0]), cU0, "USDC debtor collateral moved");
+        assertEq(hubUSDC.collateral(actors[2]), cU2, "USDC creditor collateral moved");
+        assertEq(hubEURC.collateral(actors[1]), cE1, "EURC debtor collateral moved");
+        assertEq(hubEURC.collateral(actors[3]), cE3, "EURC creditor collateral moved");
+    }
+
+    /// A paused EURC hub rejects executeRound (RESEARCH Q1.4) — EnforcedPause
+    /// bubbles through the router and reverts the executed USDC leg.
+    function test_revert_executePvP_pausedHub() public {
+        PvPBundle memory b = _simplePvP("paused-eurc");
+        hubEURC.pause(); // harness is the owner
+
+        uint64 nU = hubUSDC.roundNonce();
+        uint64 nE = hubEURC.roundNonce();
+        uint256 cU0 = hubUSDC.collateral(actors[0]);
+        uint256 cU2 = hubUSDC.collateral(actors[2]);
+        uint256 cE1 = hubEURC.collateral(actors[1]);
+        uint256 cE3 = hubEURC.collateral(actors[3]);
+
+        vm.expectRevert(abi.encodeWithSelector(Pausable.EnforcedPause.selector));
+        _submit(b);
+
+        assertEq(hubUSDC.roundNonce(), nU, "USDC nonce must not advance");
+        assertEq(hubEURC.roundNonce(), nE, "EURC nonce must not advance");
+        assertEq(hubUSDC.collateral(actors[0]), cU0, "USDC debtor collateral moved");
+        assertEq(hubUSDC.collateral(actors[2]), cU2, "USDC creditor collateral moved");
+        assertEq(hubEURC.collateral(actors[1]), cE1, "EURC debtor collateral moved");
+        assertEq(hubEURC.collateral(actors[3]), cE3, "EURC creditor collateral moved");
+    }
+
+    /// A tampered union signature (valid format, wrong recovered address at
+    /// index 1) is rejected before either hub is called.
+    function test_revert_executePvP_badPvPSignature() public {
+        PvPBundle memory b = _simplePvP("bad-pvp-sig");
+        bytes32 pvpDigest =
+            router.hashPvPRound(b.usdcDigest, b.eurcDigest, b.fxNumerator, b.fxDenominator);
+        b.pvpSignatures[1] = _signPvP(_keyOf(actors[4]), pvpDigest); // not union_[1]
+
+        uint64 nU = hubUSDC.roundNonce();
+        uint64 nE = hubEURC.roundNonce();
+        uint256 cU0 = hubUSDC.collateral(actors[0]);
+        uint256 cU2 = hubUSDC.collateral(actors[2]);
+        uint256 cE1 = hubEURC.collateral(actors[1]);
+        uint256 cE3 = hubEURC.collateral(actors[3]);
+
+        vm.expectRevert(abi.encodeWithSelector(PvPRouter.BadPvPSignature.selector, 1));
+        _submit(b);
+
+        assertEq(hubUSDC.roundNonce(), nU, "USDC nonce must not advance");
+        assertEq(hubEURC.roundNonce(), nE, "EURC nonce must not advance");
+        assertEq(hubUSDC.collateral(actors[0]), cU0, "USDC debtor collateral moved");
+        assertEq(hubUSDC.collateral(actors[2]), cU2, "USDC creditor collateral moved");
+        assertEq(hubEURC.collateral(actors[1]), cE1, "EURC debtor collateral moved");
+        assertEq(hubEURC.collateral(actors[3]), cE3, "EURC creditor collateral moved");
+    }
+
+    /// Dropping one union signature trips the exact-count rule: every union
+    /// member must consent, no exceptions.
+    function test_revert_executePvP_pvpSignatureCountMismatch() public {
+        PvPBundle memory b = _simplePvP("dropped-sig");
+        bytes[] memory short_ = new bytes[](b.pvpSignatures.length - 1);
+        for (uint256 i; i < short_.length; ++i) {
+            short_[i] = b.pvpSignatures[i];
+        }
+        b.pvpSignatures = short_; // union of {A,B,C} u {B,C,D} = 4, provided 3
+
+        uint64 nU = hubUSDC.roundNonce();
+        uint64 nE = hubEURC.roundNonce();
+        uint256 cU0 = hubUSDC.collateral(actors[0]);
+        uint256 cU2 = hubUSDC.collateral(actors[2]);
+        uint256 cE1 = hubEURC.collateral(actors[1]);
+        uint256 cE3 = hubEURC.collateral(actors[3]);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(PvPRouter.PvPSignatureCountMismatch.selector, 4, 3)
+        );
+        _submit(b);
+
+        assertEq(hubUSDC.roundNonce(), nU, "USDC nonce must not advance");
+        assertEq(hubEURC.roundNonce(), nE, "EURC nonce must not advance");
+        assertEq(hubUSDC.collateral(actors[0]), cU0, "USDC debtor collateral moved");
+        assertEq(hubUSDC.collateral(actors[2]), cU2, "USDC creditor collateral moved");
+        assertEq(hubEURC.collateral(actors[1]), cE1, "EURC debtor collateral moved");
+        assertEq(hubEURC.collateral(actors[3]), cE3, "EURC creditor collateral moved");
+    }
+
+    /// Disordered participants in one leg break the merged stream's strict
+    /// ascent — rejected router-locally, before any hub call. The leg digest
+    /// is recomputed over the swapped array so binding passes and the union
+    /// merge is the check that fires.
+    function test_revert_executePvP_unionDisorder() public {
+        PvPBundle memory b = _simplePvP("union-disorder");
+        (b.usdcLeg.participants[0], b.usdcLeg.participants[1]) =
+            (b.usdcLeg.participants[1], b.usdcLeg.participants[0]);
+        b.usdcDigest = _digestV2(
+            hubUSDC,
+            b.usdcLeg.nonce,
+            b.usdcLeg.participants,
+            b.usdcLeg.deltas,
+            b.usdcLeg.consumedIds
+        );
+
+        uint64 nU = hubUSDC.roundNonce();
+        uint64 nE = hubEURC.roundNonce();
+        uint256 cU0 = hubUSDC.collateral(actors[0]);
+        uint256 cU2 = hubUSDC.collateral(actors[2]);
+        uint256 cE1 = hubEURC.collateral(actors[1]);
+        uint256 cE3 = hubEURC.collateral(actors[3]);
+
+        vm.expectRevert(abi.encodeWithSelector(PvPRouter.UnionNotStrictlyAscending.selector));
+        _submit(b);
+
+        assertEq(hubUSDC.roundNonce(), nU, "USDC nonce must not advance");
+        assertEq(hubEURC.roundNonce(), nE, "EURC nonce must not advance");
+        assertEq(hubUSDC.collateral(actors[0]), cU0, "USDC debtor collateral moved");
+        assertEq(hubUSDC.collateral(actors[2]), cU2, "USDC creditor collateral moved");
+        assertEq(hubEURC.collateral(actors[1]), cE1, "EURC debtor collateral moved");
+        assertEq(hubEURC.collateral(actors[3]), cE3, "EURC creditor collateral moved");
+    }
+
+    /// A signed digest that does not match the recomputed calldata digest is
+    /// rejected per leg, before any execution (Pitfall 2).
+    function test_revert_executePvP_legDigestMismatch() public {
+        PvPBundle memory b = _simplePvP("digest-mismatch");
+
+        uint64 nU = hubUSDC.roundNonce();
+        uint64 nE = hubEURC.roundNonce();
+        uint256 cU0 = hubUSDC.collateral(actors[0]);
+        uint256 cU2 = hubUSDC.collateral(actors[2]);
+        uint256 cE1 = hubEURC.collateral(actors[1]);
+        uint256 cE3 = hubEURC.collateral(actors[3]);
+
+        bytes32 goodU = b.usdcDigest;
+        b.usdcDigest = keccak256("wrong-usdc-digest");
+        vm.expectRevert(abi.encodeWithSelector(PvPRouter.LegDigestMismatch.selector, 0));
+        _submit(b);
+
+        b.usdcDigest = goodU;
+        b.eurcDigest = keccak256("wrong-eurc-digest");
+        vm.expectRevert(abi.encodeWithSelector(PvPRouter.LegDigestMismatch.selector, 1));
+        _submit(b);
+
+        assertEq(hubUSDC.roundNonce(), nU, "USDC nonce must not advance");
+        assertEq(hubEURC.roundNonce(), nE, "EURC nonce must not advance");
+        assertEq(hubUSDC.collateral(actors[0]), cU0, "USDC debtor collateral moved");
+        assertEq(hubUSDC.collateral(actors[2]), cU2, "USDC creditor collateral moved");
+        assertEq(hubEURC.collateral(actors[1]), cE1, "EURC debtor collateral moved");
+        assertEq(hubEURC.collateral(actors[3]), cE3, "EURC creditor collateral moved");
+    }
+
+    /// Structural replay protection (RESEARCH Q2): each signed leg digest
+    /// binds its hub's roundNonce, so re-submitting the identical calldata
+    /// reverts WrongRoundNonce with NO router state involved.
+    function test_revert_executePvP_replaySameBundle() public {
+        PvPBundle memory b = _simplePvP("replay");
+        _submit(b); // first submission settles both legs
+
+        uint64 nU = hubUSDC.roundNonce();
+        uint64 nE = hubEURC.roundNonce();
+        uint256 cU0 = hubUSDC.collateral(actors[0]);
+        uint256 cU2 = hubUSDC.collateral(actors[2]);
+        uint256 cE1 = hubEURC.collateral(actors[1]);
+        uint256 cE3 = hubEURC.collateral(actors[3]);
+
+        vm.expectRevert(abi.encodeWithSelector(ClearingHubV2.WrongRoundNonce.selector, nU, 0));
+        _submit(b); // identical calldata
+
+        assertEq(hubUSDC.roundNonce(), nU, "USDC nonce must not advance again");
+        assertEq(hubEURC.roundNonce(), nE, "EURC nonce must not advance again");
+        assertEq(hubUSDC.collateral(actors[0]), cU0, "USDC debtor collateral moved");
+        assertEq(hubUSDC.collateral(actors[2]), cU2, "USDC creditor collateral moved");
+        assertEq(hubEURC.collateral(actors[1]), cE1, "EURC debtor collateral moved");
+        assertEq(hubEURC.collateral(actors[3]), cE3, "EURC creditor collateral moved");
+    }
+
+    /// MACHINE-DOCUMENTED LIMITATION (RESEARCH Q2c, accept-and-document;
+    /// D-13 cites this test). Leg consents are ordinary, valid standalone hub
+    /// Round signatures: an adversary who obtains one leg's complete
+    /// signature set — including by extracting it from this router's pending
+    /// transaction in the mempool — can settle that leg DIRECTLY on its hub,
+    /// without its twin. PvP both-or-neither holds within the router path
+    /// and against every failure/revert mode above; it does NOT hold against
+    /// unilateral direct submission of one leg. The downgrade is bounded: the
+    /// settled leg moved only unanimously signed balances, and the open leg's
+    /// obligations remain ordinary collateral-backed credit (nettable later,
+    /// recoverable via redeemIOU) — never unsigned movement. See
+    /// docs/THREAT-MODEL.md (single-leg extraction) for the full analysis
+    /// and the signature custody discipline that narrows the window.
+    function test_singleLegDirectSubmissionSettles() public {
+        PvPBundle memory b = _simplePvP("single-leg");
+
+        uint64 nU = hubUSDC.roundNonce();
+        uint256 cU0 = hubUSDC.collateral(actors[0]);
+        uint256 cU1 = hubUSDC.collateral(actors[1]);
+        uint256 cU2 = hubUSDC.collateral(actors[2]);
+
+        // The USDC leg's calldata + signatures, submitted directly to the
+        // hub, bypassing the router entirely: it SETTLES.
+        hubUSDC.executeRound(
+            b.usdcLeg.nonce,
+            b.usdcLeg.participants,
+            b.usdcLeg.deltas,
+            b.usdcLeg.consumedIds,
+            b.usdcLeg.signatures
+        );
+
+        assertEq(hubUSDC.roundNonce(), nU + 1, "single leg must settle: nonce advances");
+        assertEq(
+            hubUSDC.collateral(actors[0]),
+            uint256(int256(cU0) + b.usdcLeg.deltas[0]),
+            "single leg must settle: debtor debited"
+        );
+        assertEq(
+            hubUSDC.collateral(actors[1]),
+            uint256(int256(cU1) + b.usdcLeg.deltas[1]),
+            "single leg must settle: creditor credited"
+        );
+        assertEq(
+            hubUSDC.collateral(actors[2]),
+            uint256(int256(cU2) + b.usdcLeg.deltas[2]),
+            "single leg must settle: creditor credited (2)"
+        );
+
+        // The router bundle is now structurally dead: the USDC leg's signed
+        // nonce is consumed, so the atomic path reverts WrongRoundNonce.
+        vm.expectRevert(abi.encodeWithSelector(ClearingHubV2.WrongRoundNonce.selector, nU + 1, nU));
+        _submit(b);
     }
 }
