@@ -160,7 +160,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2)*
 
-- [ ] 04-05-PLAN.md — Dual-hub demo bootstrap (setup/env/personas), arc-stablecoin-fx quote mirror, attemptPvPRound two-pass core + runPvPRound wrapper + in-flight guard (wave 3)
+- [x] 04-05-PLAN.md — Dual-hub demo bootstrap (setup/env/personas), arc-stablecoin-fx quote mirror, attemptPvPRound two-pass core + runPvPRound wrapper + in-flight guard (wave 3)
 
 **Wave 4** *(blocked on Wave 3)*
 
@@ -181,4 +181,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4.
 | 1. Threshold Consent | 5/5 | Complete    | 2026-07-22 |
 | 2. Merkle Manifests & IOU Redemption | 8/8 | Complete    | 2026-07-24 |
 | 3. Calibration Checkpoint | 3/3 | Complete    | 2026-07-24 |
-| 4. Cross-Currency PvP Rounds | 4/7 | In Progress|  |
+| 4. Cross-Currency PvP Rounds | 5/7 | In Progress|  |
