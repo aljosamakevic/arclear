@@ -118,7 +118,20 @@ Note: Phases 1+2 complete = shippable "Arclear Net v2" release (showcase resubmi
   2. The sweep simulates margin/undercollateralization scenarios and produces an empirical answer to what q/N margin parameters survive the p10 rounds
   3. The CCP scope decision is recorded with the supporting data — DECIDED 2026-07-24: CCP arc skipped (removed from roadmap); the sweep documents the empirical basis and the margin data feeds the reference brief
 
-**Plans**: TBD
+**Plans**: 3 plans
+
+Plans:
+**Wave 1**
+
+- [ ] 03-01-PLAN.md — Pure exclude-and-recompute threshold model in `demo/thresholdModel.ts` mirroring `attemptRound`, with fast-check invariant suite (wave 1)
+
+**Wave 2** *(blocked on Wave 1)*
+
+- [ ] 03-02-PLAN.md — Exact-match cross-validation vs the real `attemptRound` (D-02) + full-grid threshold sweep to `docs/sweep/threshold-sweep.csv` with D-05 headline table (wave 2)
+
+**Wave 3** *(blocked on Wave 2)*
+
+- [ ] 03-03-PLAN.md — EWMA margin coverage sweep (q x N grid + stress ramp) to `docs/sweep/margin-sweep.csv` + `docs/CALIBRATION.md` with recorded gate decision (wave 3)
 
 Note: The original DECISION GATE was resolved by user decision on 2026-07-24 (skip the CCP arc). The sweep's value is now (a) the threshold-consent-under-uptime number for the showcase submission, and (b) documented calibration data backing `docs/V2-BRIEF.md` as the vision artifact.
 
@@ -144,5 +157,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4.
 |-------|----------------|--------|-----------|
 | 1. Threshold Consent | 5/5 | Complete    | 2026-07-22 |
 | 2. Merkle Manifests & IOU Redemption | 8/8 | Complete    | 2026-07-24 |
-| 3. Calibration Checkpoint | 0/TBD | Not started | - |
+| 3. Calibration Checkpoint | 0/3 | Not started | - |
 | 4. Cross-Currency PvP Rounds | 0/TBD | Not started | - |
