@@ -28,32 +28,7 @@ Requirements for the v2 milestone (this roadmap). Derived 1:1 from `docs/V2-BRIE
 - [ ] **CALB-01**: `demo/sweep.ts` extended to simulate threshold-consent rounds with unresponsive members — answers what member count threshold consent actually unlocks in practice
 - [ ] **CALB-02**: Sweep simulates margin/undercollateralization scenarios — answers what q/N margin parameters survive the p10 rounds; if answers are ugly, CCP scope is revisited with data
 
-### Novation (brief Phase 2)
-
-- [ ] **NOVA-01**: `ArclearCCP.sol` `novate(IOU[] ious, bytes[] sigs)` verifies both parties' signatures and margin headroom, extinguishes the bilateral obligation, and writes position deltas — both members face the hub
-- [ ] **NOVA-02**: Matched-book invariant written first and holds: `Σ openPosition == 0 && hubPosition == 0` under any sequence of novations/settlements
-- [ ] **NOVA-03**: CCP `executeRound` settles `openPosition → 0` against variation margin and collateral
-
-### Margin (brief Phase 3)
-
-- [ ] **MARG-01**: Initial margin `IM = q × EWMA(rolling peak intra-cycle net debit)` per member with lookback N; q and N exposed as governance parameters, documented as uncalibrated
-- [ ] **MARG-02**: Variation margin: open positions marked each round; adverse-side members top up within a window via `callMargin(member, amount, deadline)`
-- [ ] **MARG-03**: `declareDefault(member)` is callable by anyone after a missed margin deadline (permissionless default declaration)
-- [ ] **MARG-04**: Procyclicality cap: IM may rise at most X% per round; the solvency-vs-stability trade is documented explicitly
-- [ ] **MARG-05**: Tests show margin covers the modeled 99th-percentile debit on sweep-generated histories and the cap binds under a simulated stress ramp
-
-### Default Waterfall (brief Phase 4)
-
-- [ ] **WATR-01**: `DefaultWaterfall.sol` implements the standard 7-tranche order (defaulter VM → defaulter IM → defaulter guaranty contribution → operator skin-in-the-game → survivors' guaranty fund pro rata → capped assessments → VM-gains haircut), each tranche a separate internal function returning the residual
-- [ ] **WATR-02**: Close-out valuation is the scalar uncovered debit — no volatile mark, no auction, no hedging
-- [ ] **WATR-03**: Tests cover tranche-by-tranche exhaustion, the good case (stops at tranche 3, zero mutualization), a default reaching assessments, and the conservation invariant `total assets == total liabilities + fund balances` after any waterfall execution
-
-### Membership & Governance (brief Phase 5)
-
-- [ ] **MEMB-01**: Membership registry with admission, minimum guaranty contribution, and a suspension path
-- [ ] **MEMB-02**: README states plainly where the design stops being permissionless — the permissionless→permissioned transition is documented as the real cost of becoming a clearinghouse (Arclear Net v1 remains the permissionless product)
-
-### Cross-Currency PvP (brief Phase 6, independent/parallelizable)
+### Cross-Currency PvP (brief Phase 6)
 
 - [ ] **PVP-01**: USDC + EURC legs settle atomically in a payment-vs-payment round (miniature CLS)
 - [ ] **PVP-02**: An agreed per-round FX rate is signed into the consent digest; ties to the official `arc-stablecoin-fx` sample
@@ -75,6 +50,7 @@ Explicitly excluded. Documented to prevent scope creep.
 | Fee-on-transfer tokens | Out of protocol scope |
 | Extending `ClearingHub.sol` into the CCP | Novation/margin/waterfall break v1 invariants on purpose; CCP is a separate contract sharing the settlement layer |
 | Outvote-style k-of-n consent | Fixed decision: exclude-and-recompute, never outvote — a non-signer must never have their balance moved without consent |
+| CCP arc (NOVA-01..03, MARG-01..05, WATR-01..03, MEMB-01..02) | Removed 2026-07-24 by user decision — the CCP is a reference implementation, not a primitive; decoupled from the submission. Specs preserved in docs/V2-BRIEF.md and git history |
 
 ## Traceability
 
@@ -94,26 +70,26 @@ Which phases cover which requirements. Updated during roadmap creation.
 | MERK-04 | Phase 2 | Complete |
 | CALB-01 | Phase 3 | Pending |
 | CALB-02 | Phase 3 | Pending |
-| NOVA-01 | Phase 4 | Pending |
-| NOVA-02 | Phase 4 | Pending |
-| NOVA-03 | Phase 4 | Pending |
-| MARG-01 | Phase 5 | Pending |
-| MARG-02 | Phase 5 | Pending |
-| MARG-03 | Phase 5 | Pending |
-| MARG-04 | Phase 5 | Pending |
-| MARG-05 | Phase 5 | Pending |
-| WATR-01 | Phase 6 | Pending |
-| WATR-02 | Phase 6 | Pending |
-| WATR-03 | Phase 6 | Pending |
-| MEMB-01 | Phase 7 | Pending |
-| MEMB-02 | Phase 7 | Pending |
-| PVP-01 | Phase 8 | Pending |
-| PVP-02 | Phase 8 | Pending |
+| NOVA-01 | — | Removed (2026-07-24) |
+| NOVA-02 | — | Removed (2026-07-24) |
+| NOVA-03 | — | Removed (2026-07-24) |
+| MARG-01 | — | Removed (2026-07-24) |
+| MARG-02 | — | Removed (2026-07-24) |
+| MARG-03 | — | Removed (2026-07-24) |
+| MARG-04 | — | Removed (2026-07-24) |
+| MARG-05 | — | Removed (2026-07-24) |
+| WATR-01 | — | Removed (2026-07-24) |
+| WATR-02 | — | Removed (2026-07-24) |
+| WATR-03 | — | Removed (2026-07-24) |
+| MEMB-01 | — | Removed (2026-07-24) |
+| MEMB-02 | — | Removed (2026-07-24) |
+| PVP-01 | Phase 4 | Pending |
+| PVP-02 | Phase 4 | Pending |
 
 **Coverage:**
 
-- v1 requirements: 27 total
-- Mapped to phases: 27
+- v1 requirements: 27 total (13 removed with the CCP arc 2026-07-24)
+- Mapped to phases: 14 active
 - Unmapped: 0 ✓
 
 ---

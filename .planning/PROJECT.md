@@ -27,10 +27,6 @@ A CCP is defined by operating *through* a member failure: the system must keep s
 - [x] **Phase 0 — Threshold consent (liveness):** exclude-and-recompute rounds — threshold over the candidate set, unanimity over the final executed set; `ClearingHubV2.sol` + round-rebuild logic in `round.ts`
 - [x] **Phase 1 — Merkle manifests + on-chain IOU redemption:** sorted-leaf merkle manifest roots, inclusion/non-inclusion proofs, `redeemIOU` recovery path against unresponsive debtors with nullifier protection
 - [ ] **Calibration checkpoint (between Phases 1 and 2):** extend `demo/sweep.ts` to simulate threshold-consent rounds with unresponsive members and margin scenarios; answers gate CCP scope
-- [ ] **Phase 2 — Novation (`ArclearCCP.sol`):** members face the hub; matched-book invariant `Σ openPosition == 0 && hubPosition == 0` under any novation/settlement sequence
-- [ ] **Phase 3 — Margin:** EWMA-based initial margin (governance params q, N), variation margin calls, permissionless `declareDefault`, procyclicality cap on IM, all parameters labeled uncalibrated
-- [ ] **Phase 4 — Default waterfall (`DefaultWaterfall.sol`):** standard 7-tranche order incl. operator skin-in-the-game; tranche-by-tranche legibility; conservation invariant after any waterfall execution
-- [ ] **Phase 5 — Membership & governance:** admission registry, minimum guaranty contribution, suspension path; README states plainly where the design stops being permissionless
 - [ ] **Phase 6 — Cross-currency PvP rounds:** USDC + EURC legs settling atomically with per-round signed FX rate (miniature CLS); independent, parallelizable
 
 ### Out of Scope
@@ -40,7 +36,7 @@ A CCP is defined by operating *through* a member failure: the system must keep s
 - Calibrated production risk parameters — production needs backtesting; parameters are documented as uncalibrated by design
 - UI beyond the existing dashboard pattern — not the point of the project
 - Fee-on-transfer tokens — out of protocol scope
-- Extending `ClearingHub.sol` into the CCP — novation/margin/waterfall break v1 invariants on purpose; CCP is a separate contract sharing the settlement layer
+- The CCP arc (novation, margin, default waterfall, membership) — removed from scope 2026-07-24: a reference implementation, not a primitive; docs/V2-BRIEF.md remains the vision artifact
 
 ## Context
 
