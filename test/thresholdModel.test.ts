@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import fc from "fast-check";
 import type { Hex } from "viem";
 import { net } from "../src/netting.js";
 import type { SignedIou } from "../src/types.js";
@@ -208,5 +209,139 @@ describe("thresholdModel attemptRound-mirroring behaviors", () => {
       expect(u).toBeGreaterThanOrEqual(0);
       expect(u).toBeLessThan(1);
     }
+  });
+});
+
+const arbParams = fc
+  .record({
+    n: fc.integer({ min: 3, max: 12 }),
+    density: fc.double({ min: 0.3, max: 1, noNaN: true }),
+    reciprocity: fc.double({ min: 0, max: 1, noNaN: true }),
+    uptime: fc.double({ min: 0.5, max: 1, noNaN: true }),
+    rounds: fc.integer({ min: 2, max: 6 }),
+    seed: fc.integer({ min: -2147483648, max: 2147483647 }),
+  })
+  .map((r): ThresholdParams => r);
+
+const RUNS = { numRuns: 25 };
+
+function isSettled(kind: string): boolean {
+  return kind === "settled-1pass" || kind === "settled-2pass";
+}
+
+describe("thresholdModel properties", () => {
+  it("zero-sum after exclusion: every settled record's deltas sum to 0n", () => {
+    fc.assert(
+      fc.property(arbParams, (params) => {
+        const h = simulateThresholdHistory(params);
+        for (const rec of h.records) {
+          if (!isSettled(rec.kind)) continue;
+          let sum = 0n;
+          for (const d of rec.deltas.values()) sum += d;
+          expect(sum).toBe(0n);
+        }
+      }),
+      RUNS,
+    );
+  });
+
+  it("never-twice: total consumedCount accounts for every generated IOU at most once", () => {
+    fc.assert(
+      fc.property(arbParams, (params) => {
+        const h = simulateThresholdHistory(params);
+        const consumed = h.records.reduce((a, r) => a + r.consumedCount, 0);
+        expect(consumed).toBe(h.generatedCount - h.unsettledCount);
+        expect(consumed).toBeLessThanOrEqual(h.generatedCount);
+      }),
+      RUNS,
+    );
+  });
+
+  it("determinism: identical params produce byte-identical histories", () => {
+    fc.assert(
+      fc.property(arbParams, (params) => {
+        const a = simulateThresholdHistory(params);
+        const b = simulateThresholdHistory(params);
+        expect(a.records.map((r) => r.kind)).toEqual(b.records.map((r) => r.kind));
+        expect(a.records.map((r) => r.settledVolume)).toEqual(
+          b.records.map((r) => r.settledVolume),
+        );
+        expect(a.excludedLatencies).toEqual(b.excludedLatencies);
+        expect(a).toEqual(b);
+      }),
+      RUNS,
+    );
+  });
+
+  it("p=1.0 idealized equivalence: only 1-pass settles, no exclusion latency", () => {
+    fc.assert(
+      fc.property(arbParams, (params) => {
+        const ideal: ThresholdParams = { ...params, uptime: 1.0 };
+        const h = simulateThresholdHistory(ideal);
+        for (const rec of h.records) {
+          expect(["settled-1pass", "empty"]).toContain(rec.kind);
+          expect(rec.excluded).toEqual([]);
+        }
+        expect(h.excludedLatencies).toEqual([]);
+        // Unsettled paper can only come from trailing empty rounds.
+        let trailing = 0;
+        for (let r = ideal.rounds - 1; r >= 0 && h.records[r].kind === "empty"; r--) {
+          trailing += roundFlowBatch(ideal.seed, r, ideal).length;
+        }
+        expect(h.unsettledCount).toBe(trailing);
+      }),
+      RUNS,
+    );
+  });
+
+  it("conservation: netting can only compress — settledVolume <= grossVolume", () => {
+    fc.assert(
+      fc.property(arbParams, (params) => {
+        const h = simulateThresholdHistory(params);
+        let settledSum = 0n;
+        let grossSum = 0n;
+        for (const rec of h.records) {
+          if (isSettled(rec.kind)) {
+            expect(rec.settledVolume <= rec.grossVolume).toBe(true);
+          }
+          settledSum += rec.settledVolume;
+          grossSum += rec.grossVolume;
+        }
+        expect(settledSum <= grossSum).toBe(true);
+      }),
+      RUNS,
+    );
+  });
+
+  it("abort safety: aborted rounds settle nothing and leak no consumption", () => {
+    fc.assert(
+      fc.property(arbParams, (params) => {
+        const h = simulateThresholdHistory(params);
+        for (const rec of h.records) {
+          if (rec.kind !== "aborted") continue;
+          expect(rec.deltas.size).toBe(0);
+          expect(rec.outflows.size).toBe(0);
+          expect(rec.consumedCount).toBe(0);
+          expect(rec.settledVolume).toBe(0n);
+        }
+        // Aborted paper carries and is later consumed at most once in total.
+        const consumed = h.records.reduce((a, r) => a + r.consumedCount, 0);
+        expect(consumed + h.unsettledCount).toBe(h.generatedCount);
+      }),
+      RUNS,
+    );
+  });
+
+  it("round-unique ids: no id ever appears twice across a history's batches", () => {
+    fc.assert(
+      fc.property(arbParams, (params) => {
+        const ids: string[] = [];
+        for (let r = 0; r < params.rounds; r++) {
+          for (const s of roundFlowBatch(params.seed, r, params)) ids.push(s.id);
+        }
+        expect(new Set(ids).size).toBe(ids.length);
+      }),
+      RUNS,
+    );
   });
 });
