@@ -127,7 +127,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1)*
 
-- [ ] 03-02-PLAN.md — Exact-match cross-validation vs the real `attemptRound` (D-02) + full-grid threshold sweep to `docs/sweep/threshold-sweep.csv` with D-05 headline table (wave 2)
+- [x] 03-02-PLAN.md — Exact-match cross-validation vs the real `attemptRound` (D-02) + full-grid threshold sweep to `docs/sweep/threshold-sweep.csv` with D-05 headline table (wave 2)
 
 **Wave 3** *(blocked on Wave 2)*
 
@@ -157,5 +157,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4.
 |-------|----------------|--------|-----------|
 | 1. Threshold Consent | 5/5 | Complete    | 2026-07-22 |
 | 2. Merkle Manifests & IOU Redemption | 8/8 | Complete    | 2026-07-24 |
-| 3. Calibration Checkpoint | 1/3 | In Progress|  |
+| 3. Calibration Checkpoint | 2/3 | In Progress|  |
 | 4. Cross-Currency PvP Rounds | 0/TBD | Not started | - |
