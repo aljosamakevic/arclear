@@ -155,8 +155,8 @@ Plans:
 
 **Wave 2** *(parallel, blocked on Wave 1)*
 
-- [ ] 04-03-PLAN.md — D-05 fixture pipeline: genFixture pvp_* keys, digest.json regen, TS fixture lock, PvPParity.t.sol deployCodeTo parity (wave 2)
-- [ ] 04-04-PLAN.md — Dual-hub PvPRoundBuilder harness, full revert matrix + single-leg documented-limitation test, measured gas + PvPRouterClient/abi module (wave 2)
+- [x] 04-03-PLAN.md — D-05 fixture pipeline: genFixture pvp_* keys, digest.json regen, TS fixture lock, PvPParity.t.sol deployCodeTo parity (wave 2)
+- [x] 04-04-PLAN.md — Dual-hub PvPRoundBuilder harness, full revert matrix + single-leg documented-limitation test, measured gas + PvPRouterClient/abi module (wave 2)
 
 **Wave 3** *(blocked on Wave 2)*
 
@@ -181,4 +181,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4.
 | 1. Threshold Consent | 5/5 | Complete    | 2026-07-22 |
 | 2. Merkle Manifests & IOU Redemption | 8/8 | Complete    | 2026-07-24 |
 | 3. Calibration Checkpoint | 3/3 | Complete    | 2026-07-24 |
-| 4. Cross-Currency PvP Rounds | 2/7 | In Progress|  |
+| 4. Cross-Currency PvP Rounds | 4/7 | In Progress|  |
