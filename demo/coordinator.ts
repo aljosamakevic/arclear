@@ -324,6 +324,10 @@ export interface ExecutedRound {
   excluded: string[];
   /** Signature-collection passes it took to settle: 1 or 2 (hard cap, D-03). */
   passCount: number;
+  /** Present iff this round settled as one leg of an atomic PvP bundle: the
+   * agreed rate as num/den base-unit strings (D-04). Flows through /state's
+   * existing rounds serialization — no new endpoint (D-12). */
+  pvp?: { fxNumerator: string; fxDenominator: string };
 }
 
 /**
@@ -356,6 +360,12 @@ export class Coordinator {
     txHash?: Hex;
   };
 
+  /** External hold (Pitfall 4): while set, runRound refuses to start. The
+   * PvP wrapper holds BOTH hubs' coordinators while a bundle is in flight so
+   * no ordinary round can advance either leg's nonce. Holding grants no
+   * authority — it can only PREVENT this instance from assembling rounds. */
+  private holdReason?: string;
+
   constructor(
     readonly hub: Address,
     readonly hubClient: HubClient,
@@ -366,6 +376,16 @@ export class Coordinator {
     opts: { consentWindowMs?: number } = {},
   ) {
     this.consentWindowMs = opts.consentWindowMs ?? 30_000;
+  }
+
+  /** Freeze ordinary rounds (a PvP bundle is in flight on this hub pair). */
+  hold(reason: string) {
+    this.holdReason = reason;
+  }
+
+  /** Lift the freeze — the PvP bundle settled, aborted, or was reconciled. */
+  release() {
+    this.holdReason = undefined;
   }
 
   addIous(batch: SignedIou[]) {
@@ -463,6 +483,14 @@ export class Coordinator {
   }
 
   async runRound(now: bigint, windowMs?: number): Promise<RunRoundResult> {
+    // Pitfall 4: refuse to start while a PvP bundle holds this hub — an
+    // ordinary round advancing the nonce would make the router revert
+    // WrongRoundNonce on an otherwise-valid bundle. Blocked-as-data, no I/O.
+    if (this.holdReason !== undefined) {
+      this.phase = "aborted";
+      this.phaseDetail = this.holdReason;
+      return { outcome: "aborted", reason: this.holdReason, excluded: [], passCount: 0 };
+    }
     try {
       this.phase = "netting";
       this.phaseDetail = "computing net positions";
