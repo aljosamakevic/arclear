@@ -8,7 +8,7 @@ import {
   verifyConsent,
   verifyProposal,
 } from "../src/round.js";
-import { clearingHubAbi, HubClient } from "../src/client.js";
+import { HubClient } from "../src/client.js";
 import { clearingHubV2Abi } from "../src/abi/ClearingHubV2.js";
 import type { NetResult, RoundProposal, SignedIou } from "../src/types.js";
 import type { AgentPersona } from "./agents.js";
@@ -427,7 +427,11 @@ export class Coordinator {
       // The nonce was consumed — by our round or by a concurrent one.
       const logs = await this.pub.getContractEvents({
         address: this.hub,
-        abi: clearingHubAbi,
+        // WR-02 (review): bind to the deployed contract's ABI. The v1 and v2
+        // RoundExecuted signatures happen to be byte-identical today, but a
+        // future V2 event change must not silently zero out this "was our
+        // round mined?" check — that would re-net already-settled paper.
+        abi: clearingHubV2Abi,
         eventName: "RoundExecuted",
         args: { roundNonce: pending.roundNonce },
         fromBlock: pending.sentAtBlock,
