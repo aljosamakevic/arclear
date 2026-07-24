@@ -74,14 +74,20 @@ function mixSeed(s: number, n: number, p: number, density: number, reciprocity: 
   );
 }
 
+/** Empty samples return NaN — rendered verbatim ("NaN") by toFixed in the
+ * CSV, so a cell with zero contributing observations is never conflated with
+ * a measured 0.0000. NOTE: the committed docs/sweep/threshold-sweep.csv
+ * predates this marker; its fully-empty cells (n=50, p=0.8: abort_rate
+ * 1.0000 ∧ unsettled_fraction 1.0000) read imputed 0.0000 — see
+ * docs/CALIBRATION.md "Data notes". */
 function percentile(xs: number[], p: number): number {
-  if (xs.length === 0) return 0;
+  if (xs.length === 0) return NaN;
   const s = [...xs].sort((a, b) => a - b);
   return s[Math.min(s.length - 1, Math.floor((p / 100) * s.length))];
 }
 
 function mean(xs: number[]): number {
-  if (xs.length === 0) return 0;
+  if (xs.length === 0) return NaN;
   let sum = 0;
   for (const x of xs) sum += x;
   return sum / xs.length;

@@ -16,6 +16,18 @@ Data sources (committed, reproducible):
 Tables below transcribe values verbatim from the CSVs (fractions, 4 decimals;
 debits in token base units) — nothing re-rounded, nothing invented.
 
+**Data notes (empty-sample cells in `threshold-sweep.csv`).** In the
+committed threshold CSV, rows where `abort_rate=1.0000` and
+`unsettled_fraction=1.0000` — the 16 rows at **n=50, p=0.8** — never settled
+a single round, so their `median_realized_compression`, `median_worst_saving`
+and both latency statistics are **imputed 0.0000, not measured zeros**. In
+adjacent high-abort cells (abort_rate > 0.95 at p=0.8/0.9), medians are
+conditioned on the subset of seeds with at least one settled round, even
+though the `seeds` column reads 200 — read them as survivorship-conditioned.
+The sweep script now emits `NaN` for empty samples so future regenerations
+distinguish no-data from zero; the committed CSV predates that marker and is
+kept byte-identical. None of the cells cited in this document is imputed.
+
 ## 1. Why this sweep exists
 
 Unanimity's idealized numbers were never the real numbers. v1's sweep measured
