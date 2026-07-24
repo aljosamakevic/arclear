@@ -20,6 +20,7 @@ import {
   type NonInclusionKind,
   type NonInclusionProof,
 } from "../src/merkle.js";
+import { buildPvPProposal, signPvPConsent } from "../src/pvp.js";
 import { manifestHash, roundDigest, signConsent, buildProposal } from "../src/round.js";
 import type { Iou } from "../src/types.js";
 
@@ -69,6 +70,35 @@ const signedIou = await signIou(HUB, iou, accounts[0], undefined, {
   now: 4_102_444_800n - 86_400n,
 });
 
+// ---------------------------------------------------------------------------
+// pvp_* keys — PvPRound cross-stack vector (PVP-02, D-05). PvPParity.t.sol
+// reads these same flat keys and asserts hashPvPRound + ECDSA recovery parity.
+// ---------------------------------------------------------------------------
+
+const PVP_HUB_USDC = HUB; // USDC leg reuses the fixture hub above
+const PVP_HUB_EURC = "0x2222222222222222222222222222222222222222" as Address;
+const PVP_ROUTER = "0x3333333333333333333333333333333333333333" as Address;
+
+// USDC leg: the fixture's existing round proposal (already built against HUB).
+const pvpUsdcLeg = proposal;
+
+// EURC leg: same participant trio, distinct IOU nonce (and hub domain) so its
+// digest necessarily differs from the USDC leg's.
+const eurcIou: Iou = { ...iou, nonce: 2n };
+const eurcIds = [iouId(PVP_HUB_EURC, eurcIou)].sort() as Hex[];
+const pvpEurcLeg = buildProposal(PVP_HUB_EURC, 0n, {
+  participants,
+  deltas,
+  consumedIds: eurcIds,
+  settledVolume: 3_000_000n,
+  grossVolume: 3_000_000n,
+});
+
+// Rate vector mirrors the arc-stablecoin-fx amount-pair example:
+// 1_000_000 USDC base units <-> 989_589 EURC base units.
+const pvpProposal = buildPvPProposal(PVP_ROUTER, pvpUsdcLeg, pvpEurcLeg, 989_589n, 1_000_000n);
+const pvpConsent0 = await signPvPConsent(PVP_ROUTER, pvpProposal, accounts[0]);
+
 const fixture = {
   hub: HUB,
   chainId: 5042002,
@@ -80,6 +110,19 @@ const fixture = {
   iouId: id,
   signer0: participants[0],
   consent0: consent,
+  // pvp_* keys inserted BEFORE the iou_* group so regeneration is purely
+  // additive in the JSON diff (appending at the end would rewrite the last
+  // pre-existing line to gain a trailing comma).
+  pvpHubUsdc: PVP_HUB_USDC,
+  pvpHubEurc: PVP_HUB_EURC,
+  pvpRouter: PVP_ROUTER,
+  pvpUsdcLegDigest: pvpUsdcLeg.digest,
+  pvpEurcLegDigest: pvpEurcLeg.digest,
+  pvpFxNumerator: String(pvpProposal.fxNumerator),
+  pvpFxDenominator: String(pvpProposal.fxDenominator),
+  pvpDigest: pvpProposal.digest,
+  pvpSigner0: participants[0],
+  pvpConsent0,
   iouDebtor: iou.debtor,
   iouCreditor: iou.creditor,
   iouAmount: String(iou.amount),

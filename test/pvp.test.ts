@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { privateKeyToAccount } from "viem/accounts";
 import type { Account } from "viem/accounts";
 import type { Address, Hex } from "viem";
@@ -302,5 +305,44 @@ describe("verifyPvPProposal", () => {
     );
     expect(check.ok).toBe(false);
     expect(check.reason).toMatch(/^eurc leg: .*roundNonce mismatch/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Shared fixture lock (D-05): the same PvPRound vector PvPParity.t.sol reads.
+// ---------------------------------------------------------------------------
+
+describe("shared fixture parity (D-05)", () => {
+  it("matches the pvp vector consumed by the Foundry parity test", async () => {
+    const raw = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "fixtures", "digest.json"),
+      "utf8",
+    );
+    const f = JSON.parse(raw);
+    const fxNumerator = BigInt(f.pvpFxNumerator);
+    const fxDenominator = BigInt(f.pvpFxDenominator);
+    const digest = pvpDigest(
+      f.pvpRouter,
+      {
+        usdcLegDigest: f.pvpUsdcLegDigest,
+        eurcLegDigest: f.pvpEurcLegDigest,
+        fxNumerator,
+        fxDenominator,
+      },
+      f.chainId,
+    );
+    expect(digest).toBe(f.pvpDigest);
+    // Consent parity: the fixture signer's viem signature verifies over a
+    // proposal rebuilt from the fixture's leg digests + rate alone.
+    const proposal: PvPProposal = {
+      usdcLeg: fakeLeg(f.pvpUsdcLegDigest),
+      eurcLeg: fakeLeg(f.pvpEurcLegDigest),
+      fxNumerator,
+      fxDenominator,
+      digest,
+    };
+    expect(
+      await verifyPvPConsent(f.pvpRouter, proposal, f.pvpSigner0, f.pvpConsent0, f.chainId),
+    ).toBe(true);
   });
 });
