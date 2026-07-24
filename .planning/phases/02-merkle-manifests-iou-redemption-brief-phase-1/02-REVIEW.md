@@ -27,7 +27,11 @@ findings:
   warning: 2
   info: 4
   total: 6
-status: issues_found
+status: fixes_applied
+fixed_at: 2026-07-24T00:00:00Z
+fixed:
+  warning: 2
+  info_deferred: 4
 ---
 
 # Phase 2: Code Review Report
@@ -35,7 +39,7 @@ status: issues_found
 **Reviewed:** 2026-07-24
 **Depth:** standard
 **Files Reviewed:** 17
-**Status:** issues_found
+**Status:** fixes_applied (WR-01, WR-02 fixed; IN-01..04 deferred)
 
 ## Summary
 
@@ -105,6 +109,12 @@ verifyProposal(this.hub, proposal, openIous, persona.account.address, {
 Alternatively, document in-code that the demo relies on its sequential
 single-round invariant and that production integrators must supply
 `pendingConsumedIds`.
+**Outcome:** FIXED (commit `b69db11`). Each consent provider now derives the
+consumed-id union from the coordinator's live `pendingSubmission` state at
+verification time and threads it into `verifyProposal` as
+`pendingConsumedIds`, so the overlapping-paper refusal branch is fully wired
+for concurrent integrators. `verifyProposal`'s signature unchanged. Verified:
+`tsc --noEmit`, vitest 64/64, `e2e:anvil` PASS.
 
 ### WR-02: `reconcilePendingSubmission` decodes V2 `RoundExecuted` events through the v1 `clearingHubAbi`
 
@@ -131,6 +141,11 @@ const logs = await this.pub.getContractEvents({
   fromBlock: pending.sentAtBlock,
 });
 ```
+**Outcome:** FIXED (commit `970d782`). `reconcilePendingSubmission` now decodes
+`RoundExecuted` via `clearingHubV2Abi`; the now-unused v1 `clearingHubAbi`
+import was dropped from `demo/coordinator.ts` (audited: no other v1-ABI event
+usage remains in the file). Verified: `tsc --noEmit`, vitest 64/64,
+`e2e:anvil` PASS.
 
 ## Info
 
@@ -148,6 +163,7 @@ contract; treat as a documentation/hardening note only, not a change request.
 **Fix (future revision only):** In a later contract version, assert
 `rootRing[slot].nonce == bufferedNonce` as belt-and-suspenders defense-in-depth,
 matching the "defense in depth beyond signature binding" posture used elsewhere.
+**Outcome:** DEFERRED — hardening note against the already-deployed contract; no code change possible without a redeploy, tracked for the next contract revision.
 
 ### IN-02: SDK `verifyNonInclusion` accepts any id under a caller-supplied empty-root sentinel
 
@@ -161,6 +177,7 @@ for integrators building their own verification flows.
 **Fix:** Document on the function that `root` MUST be an authenticated on-chain
 root, or optionally accept the expected `leafCount`/manifest and refuse the
 sentinel path when the manifest is known non-empty.
+**Outcome:** DEFERRED — documentation-grade SDK footgun with no in-protocol exposure (roots always come from on-chain `rootRing`); doc comment to be added in a docs pass.
 
 ### IN-03: `fetchManifest` assumes a top-level EOA `executeRound` call
 
@@ -176,6 +193,7 @@ opaque `AbiFunctionSignatureNotFoundError` (uncaught, propagating out of
 **Fix:** Wrap the decode in a try/catch that rethrows the descriptive error, and
 document that manifest reconstruction requires the round to have been submitted
 as a direct top-level `executeRound` call to the hub.
+**Outcome:** DEFERRED — error-message ergonomics only (demo relayer is always a top-level EOA call); the redemption path itself is correct, improve alongside IN-04.
 
 ### IN-04: Redemption proof assembly re-scans full log history (`fromBlock: 0n`) per buffered round
 
@@ -191,6 +209,7 @@ to let the debtor exit.
 **Fix:** Cache the RoundExecuted log→tx lookups, or narrow `fromBlock` using the
 known round-nonce-to-block relationship (e.g., persist a nonce→block index), so
 proof assembly does not degrade with chain length.
+**Outcome:** DEFERRED — availability/perf note, negligible on the young Arc Testnet; a nonce→block index is a self-contained follow-up, out of this fix pass's scope.
 
 ---
 
