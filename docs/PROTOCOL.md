@@ -18,6 +18,13 @@ collateralized recovery path.
 - **Participant** — an EOA that deposits collateral into a `ClearingHub` and
   signs IOUs (as debtor) and round consents. Depositing is joining; there is
   no registry.
+- **Debtor / creditor** (canonical definitions — other docs link here, they do
+  not redefine): **debtor** = the party that owes (consumed the service);
+  **creditor** = the party that is owed (provided it). The **debtor signs the
+  IOU** — the signature is them admitting the debt and authorizing that their
+  collateral can be reduced by it. Roles are per-IOU: over a day an agent is
+  debtor on what it consumed and creditor on what it provided; those
+  flip-flopping positions are exactly what nets out.
 - **Coordinator** — any process that relays IOUs, computes nettings, and
   assembles rounds. Holds **no keys and no authority**: it cannot forge
   consent, every participant re-derives the netting before signing, and
@@ -220,6 +227,29 @@ in a payments CCP the defaulter's position is a scalar debit in a stable unit
 liveness. It moves no risk, changes no math, and leaves the safety invariant
 exactly where v1 put it — every settled balance movement was signed by its
 owner over the exact executed position set.
+
+## Capital model (collateral vs credit)
+
+Two layers, stated in one place (expanded treatment with worked examples in
+the README "Capital model" section and `docs/CONCEPTS.md`):
+
+- **Layer 1 — on-chain collateral (posted upfront, real funds locked).** A
+  participant `deposit()`s before they are a credible counterparty. A net
+  debtor whose collateral does not cover their net debit makes the round
+  revert (`InsufficientCollateral`). Collateral is sized to the **net**
+  position, which netting keeps far below gross turnover — "netting
+  efficiency" means *post your net, not your gross*, never *post nothing*.
+- **Layer 2 — off-chain inter-party credit (the tab, between settlements).**
+  A creditor who accepts a signed IOU instead of immediate payment is
+  *extending credit* — holding a promise, not cash; no token moves. The
+  creditor's exposure in this window is bounded and backed four ways:
+  bilateral credit caps (`src/creditCap.ts`) cap the maximum loss per
+  counterparty; the debtor's posted collateral backs their paper (more
+  deposited → more credit others will extend); `redeemIOU` gives a
+  collateralized recovery path against a vanished debtor (best-effort — it
+  races the never-pausable `withdraw`; see [IOU
+  redemption](#iou-redemption)); and round frequency shrinks the credit
+  window.
 
 ## Settlement semantics
 

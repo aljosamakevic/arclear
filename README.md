@@ -1,9 +1,12 @@
 # ⚖️ arclear
 
-**A multilateral obligation-netting clearinghouse primitive for [Arc](https://arc.network).**
-100 micropayments, 1 settlement: agents exchange signed EIP-712 IOUs off-chain and
-periodically settle only **net** positions from pre-posted collateral — atomically,
-under unanimous consent, in a single transaction.
+**A permissionless multilateral obligation-netting clearinghouse primitive for
+any ERC-20 on [Arc](https://arc.network).** 100 micropayments, 1 settlement:
+parties accumulate signed EIP-712 IOUs off-chain (a tab, with a limit), then
+settle only the **net** residual from pre-posted collateral — atomically, under
+consent, in one transaction. It moves working capital from turnover-sized to
+exposure-sized: the reason DTCC and CLS exist, as a ~250-line contract you
+deploy.
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -21,26 +24,88 @@ under unanimous consent, in a single transaction.
 
 ## Why this exists
 
-Circle Gateway's x402 batching compresses **transaction count**: many signed
-authorizations, one `submitBatch`. It does not compress **value or float** —
-every payment settles gross, and an agent must pre-fund its *gross* outflow
-even when counterparties are paying it back all day. Two agents trading $500
-of services in both directions each need ~$500 of idle float.
+Circle Gateway's x402 nanopayments compress **your outbound transaction count
+and gas**: many signed authorizations, one bulk settlement, netting *your own*
+outflows against your **prepaid** Gateway balance. What it does not do is
+offset the flows coming back the other way — the money the same counterparties
+owe *you* — or extend credit between parties. Each authorization is backed by
+USDC you deposited, so your working capital stays sized to your outbound spend.
+Two agents trading $500 of services in both directions each keep ~$500 funded.
 
-Netting fixes the other axis. Obligations accumulate off-chain as signed
-IOUs (a tab, with a limit); a netting round cancels offsetting flows and
-settles only residuals. Working capital drops from turnover-sized to
-exposure-sized — the reason DTCC and CLS exist. And unlike the USDC-only
-Gateway rail, a hub clears **any ERC-20**: deploy one for USDC, one for EURC.
+Netting fixes that other axis. Obligations accumulate off-chain as signed IOUs
+(a tab, with a limit); a round cancels offsetting *and cyclic* flows (A→B→C→A)
+and settles only residuals from pre-posted collateral. Working capital drops
+from turnover-sized to exposure-sized — the reason DTCC and CLS exist. And a
+hub clears **any ERC-20**: deploy one for USDC, one for EURC.
 
-|                        | Gateway batching | arclear netting |
-| ---------------------- | ---------------- | --------------- |
-| compresses             | transactions     | value + float   |
-| pre-funding needed     | gross outflow    | net exposure    |
-| credit between parties | none (prepay)    | bounded tab     |
-| tokens                 | USDC only        | any ERC-20      |
+|                        | Gateway / x402 nanopayments | arclear netting            |
+| ---------------------- | --------------------------- | -------------------------- |
+| compresses             | your outbound tx count + gas | reciprocal value + float   |
+| netting scope          | one payer's own outflows    | full graph (bilateral + cyclic) |
+| funding model          | prepaid balance ≥ your spend | collateral ≥ net exposure  |
+| credit between parties | none (prepay)               | bounded tab                |
+| tokens                 | USDC / Circle stablecoins   | any ERC-20                 |
+| operator / custody     | Circle facilitator; non-custodial deposit, 7-day trustless exit | permissionless; no operator; withdraw never pausable |
+| member default         | n/a (prepaid → no credit risk) | collateralized redemption (`redeemIOU`, best-effort) |
 
-They compose: net first, settle residuals over whatever rail you like.
+**They compose, they don't compete.** Net your mutual obligations through
+Arclear, then settle the residual over whatever rail you like — including
+Gateway. Gateway compresses transactions; Arclear compresses reciprocal float —
+which is why Arclear carries a credit layer (bounded caps + a collateralized
+recovery path) and Gateway doesn't need one.
+
+## Capital model: collateral vs credit (two layers)
+
+Arclear is **collateralized**. "Netting efficiency" means *post your net, not
+your gross* — never *post nothing*.
+
+**Layer 1 — on-chain collateral (posted upfront, real funds locked).** You
+`deposit()` into the hub before you're a credible counterparty. A net debtor
+whose collateral doesn't cover their net debit makes the round *revert*
+(`InsufficientCollateral`). You size this to your **net** position, which
+netting keeps far below your gross turnover.
+
+**Layer 2 — off-chain inter-party credit (the tab, between settlements).**
+When a creditor renders service and accepts a signed IOU instead of immediate
+payment, they are *extending credit* — holding a promise, not cash. No token
+moves. This is what lets obligations pile up and cancel. The creditor's
+exposure in this window is bounded and backed four ways:
+
+1. **Credit caps** cap the maximum loss to any one counterparty.
+2. **Posted collateral backs the credit** — it's what makes your IOUs
+   credible; more deposited → more credit others will extend you.
+3. **`redeemIOU`** lets a creditor recover from a vanished debtor's collateral
+   (best-effort; races the never-pausable `withdraw`).
+4. **Round frequency** shrinks the credit window.
+
+Worked example — A owes B $500, B owes A $300: net is A owes B **$200**. A
+needs collateral ≥ **$200** (the net), not $500 (the gross); during the day B's
+exposure to A is bounded by A's credit cap.
+
+*(**Debtor** = the party that owes and signs the IOU; **creditor** = the party
+that is owed. Canonical definitions in [PROTOCOL.md →
+Roles](docs/PROTOCOL.md#roles); more vocabulary in
+[docs/CONCEPTS.md](docs/CONCEPTS.md).)*
+
+## Why use Arclear as a primitive
+
+- **Capital efficiency by netting, not prepay.** Post collateral sized to your
+  *net* position, not your *gross* turnover. Two agents trading $500 in both
+  directions tie up ~$0 for the offsetting portion instead of ~$500 each.
+- **Multilateral + cyclic cancellation.** Not just A↔B — obligation cycles
+  (A→B→C→A) cancel on their own. The sweep shows >30% median volume
+  compression at *zero* bilateral reciprocity for n ≥ 5.
+- **Any ERC-20.** One hub per token (USDC, EURC, …). Not stablecoin-locked.
+- **No trusted operator.** Depositing is joining. The coordinator holds no
+  keys and cannot forge consent; every participant recomputes the netting
+  before signing; the chain enforces zero-sum. Withdrawal is never pausable.
+- **Bounded, backed credit.** Bilateral caps bound worst-case loss per
+  counterparty; a debtor's posted collateral backs their IOUs; `redeemIOU`
+  gives a collateralized recovery path if a member goes dark.
+- **Composable.** Net through Arclear, settle the residual over whatever rail
+  you like — including Gateway. Different compression axes; they stack.
+- **Legible & tested.** Deterministic netting engine with a published spec
+  third parties re-implement; TS↔Solidity digest parity; property + fuzz tests.
 
 ## What's in the box
 
@@ -146,6 +211,36 @@ on-chain):
 > probe with block-sized limits reserves your whole balance for gas and makes
 > simulated token transfers revert with "transfer amount exceeds balance".
 
+## Use cases
+
+**Where netting pays off:** a set of parties transacting repeatedly and
+bidirectionally in one ERC-20, where reciprocal flows cancel. The more
+mutual/cyclic the trade, the bigger the win.
+
+| Use case | The bidirectional flow | Why netting wins |
+|---|---|---|
+| **Agent service mesh** | crawler→summarizer→oracle→trader→auditor→crawler | Cyclic flows cancel; agents fund net exposure, not gross API spend |
+| **M2M / DePIN marketplaces** | nodes relay bandwidth/compute *for each other* | High reciprocity → high compression |
+| **API / usage billing among vendors** | providers who also consume each other's APIs | Sub-cent metered billing needs near-zero settlement cost |
+| **Intercompany treasury** | subsidiaries invoicing each other | On-chain intercompany netting — literally the DTCC/CLS model |
+| **Trading desks / market makers** | counterparties with offsetting positions | Net-exposure settlement |
+| **Game / app economies** | players transferring among a fixed pool | Thousands of transfers → one settlement, bounded per-player credit |
+| **L2 / consortium fee-sharing** | sequencers/relayers splitting revenue mutually | Recurring bilateral obligations that net cleanly |
+
+The honest counterweight — when netting is *not* worth it — is measured, not
+asserted: see [Measured
+compression](#measured-compression-when-is-netting-worth-it) below and the raw
+sweep data in [docs/sweep](docs/sweep/sweep.csv).
+
+**What already exists (and why this is still the gap):** Gateway/x402
+(unidirectional, prepaid, USDC / Circle stablecoins); payment/state channels
+(pairwise, per-channel capital lockup, routing + watchtower complexity);
+rollups (compress gas, not float); streaming like Superfluid (gross
+directional flows). Traditional netting (DTCC/CLS/ACH) is off-chain,
+permissioned, and operator-trusted. Nothing occupies Arclear's spot:
+**permissionless, multilateral, on-credit netting with a collateralized
+recovery path, for any ERC-20, as a deployable contract.**
+
 ## Measured compression (when is netting worth it?)
 
 One tuned demo number is marketing. So we swept the flow-shape space —
@@ -230,9 +325,11 @@ importable on its own.
 **What does it add beyond the `circlefin/arc-*` repos?** Those repos cover
 *making* payments (commerce, p2p, x402 nanopayments, escrow, FX). None touch
 clearing: nothing nets obligations, nothing compresses float, nothing gives
-agents bounded credit. Gateway batching compresses transactions; arclear
-compresses value — a complementary layer the reference stack doesn't have,
-for USDC and EURC alike.
+agents bounded credit. Gateway compresses your outbound transaction count;
+arclear compresses reciprocal value and float across the full obligation
+graph — a complementary layer the reference stack doesn't have, for USDC and
+EURC alike. The [use-case table](#use-cases) above maps where that layer pays
+off.
 
 ## License
 
