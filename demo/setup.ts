@@ -12,17 +12,31 @@ import {
   type WalletClient,
 } from "viem";
 import { arcTestnet, MIN_MAX_FEE_PER_GAS, USDC } from "../src/domain.js";
-import { HubClient } from "../src/client.js";
+import { HubClient, PvPRouterClient } from "../src/client.js";
 import { clearingHubV2Abi, clearingHubV2Bytecode } from "../src/abi/ClearingHubV2.js";
+import { pvpRouterBytecode, pvpRouterAbi } from "../src/abi/PvPRouter.js";
 import { mockTokenAbi, mockTokenBytecode } from "./mockToken.js";
 import { agents, relayer, ANVIL_MNEMONIC, type AgentPersona } from "./agents.js";
 
 export interface DemoEnv {
   chain: Chain;
   pub: PublicClient;
+  /** USDC-side ClearingHubV2 (the original single-hub surface, unchanged). */
   hub: Address;
+  /** USDC token (mock on anvil; the native-USDC ERC-20 facade on Arc). */
   token: Address;
+  /** Typed client for the USDC hub. */
   hubClient: HubClient;
+  /** EURC stand-in token (second mock on anvil; live EURC on Arc). */
+  tokenEurc: Address;
+  /** EURC-side ClearingHubV2 — per-hub state is strictly separate (Pitfall 3). */
+  hubEurc: Address;
+  /** Typed client for the EURC hub — never share reads with hubClient. */
+  hubClientEurc: HubClient;
+  /** PvPRouter bound at deploy time to exactly (hub, hubEurc). */
+  router: Address;
+  /** Typed router client — formula-gas executePvP submission. */
+  routerClient: PvPRouterClient;
   personas: AgentPersona[];
   relayerWallet: WalletClient;
   anvil?: ChildProcess;
@@ -39,7 +53,16 @@ const anvilChain = defineChain({
 const ANVIL_COLLATERAL = parseUnits("20", 6);
 const TESTNET_COLLATERAL = parseUnits("0.5", 6); // sized for a faucet-funded deployer
 
-async function depositAll(env: Omit<DemoEnv, "explorerTx" | "anvil">, collateralAmount: bigint) {
+/**
+ * Approve + deposit collateral for every persona on ONE (token, hub) pair.
+ * Parameterized per hub so the dual-hub world keeps per-hub state strictly
+ * separate (Pitfall 3): call once for the USDC pair, once for the EURC pair.
+ */
+async function depositAll(
+  env: { chain: Chain; pub: PublicClient; personas: AgentPersona[] },
+  target: { token: Address; hub: Address },
+  collateralAmount: bigint,
+) {
   for (const p of env.personas) {
     const wallet = createWalletClient({
       account: p.account,
@@ -54,17 +77,17 @@ async function depositAll(env: Omit<DemoEnv, "explorerTx" | "anvil">, collateral
         ? { maxFeePerGas: MIN_MAX_FEE_PER_GAS, gas: 200_000n }
         : {};
     const approveHash = await wallet.writeContract({
-      address: env.token,
+      address: target.token,
       abi: erc20Abi,
       functionName: "approve",
-      args: [env.hub, collateralAmount],
+      args: [target.hub, collateralAmount],
       chain: env.chain,
       account: p.account,
       ...fee,
     });
     await env.pub.waitForTransactionReceipt({ hash: approveHash });
     const depositHash = await wallet.writeContract({
-      address: env.hub,
+      address: target.hub,
       abi: clearingHubV2Abi,
       functionName: "deposit",
       args: [collateralAmount],
@@ -76,44 +99,74 @@ async function depositAll(env: Omit<DemoEnv, "explorerTx" | "anvil">, collateral
   }
 }
 
-/** Local mode: spawn anvil, deploy mock token + hub, fund and deposit. */
+/**
+ * Local mode: spawn anvil, deploy a dual-hub world — two mock tokens (USDC +
+ * EURC stand-ins), two ClearingHubV2s, one PvPRouter bound to both — then
+ * mint both tokens to every agent and deposit collateral on BOTH hubs.
+ */
 export async function setupAnvil(): Promise<DemoEnv> {
   const anvil = spawn("anvil", ["--silent"], { stdio: "ignore" });
   await new Promise((r) => setTimeout(r, 1200));
 
   const chain = anvilChain;
+  const rpcUrl = chain.rpcUrls.default.http[0];
   const pub = createPublicClient({ chain, transport: http() });
   const personas = agents(ANVIL_MNEMONIC);
   const deployer = relayer(ANVIL_MNEMONIC);
   const wallet = createWalletClient({ account: deployer, chain, transport: http() });
 
-  const tokenTx = await wallet.deployContract({
-    abi: mockTokenAbi,
-    bytecode: mockTokenBytecode,
-    account: deployer,
-    chain,
-  });
-  const token = (await pub.waitForTransactionReceipt({ hash: tokenTx })).contractAddress!;
-  const hubTx = await wallet.deployContract({
-    abi: clearingHubV2Abi,
-    bytecode: clearingHubV2Bytecode,
-    // K/RING/MAX_IOU_LIFETIME: the same UNCALIBRATED defaults as DeployV2.s.sol.
-    args: [token, 3n, 16n, 86_400n],
-    account: deployer,
-    chain,
-  });
-  const hub = (await pub.waitForTransactionReceipt({ hash: hubTx })).contractAddress!;
-
-  for (const p of personas) {
-    const mintHash = await wallet.writeContract({
-      address: token,
+  /** Deploy one mock token; returns its address. */
+  const deployToken = async (): Promise<Address> => {
+    const tx = await wallet.deployContract({
       abi: mockTokenAbi,
-      functionName: "mint",
-      args: [p.account.address, parseUnits("100", 6)],
+      bytecode: mockTokenBytecode,
       account: deployer,
       chain,
     });
-    await pub.waitForTransactionReceipt({ hash: mintHash });
+    return (await pub.waitForTransactionReceipt({ hash: tx })).contractAddress!;
+  };
+
+  /** Deploy one ClearingHubV2 bound to `tokenAddr`; returns its address. */
+  const deployHub = async (tokenAddr: Address): Promise<Address> => {
+    const tx = await wallet.deployContract({
+      abi: clearingHubV2Abi,
+      bytecode: clearingHubV2Bytecode,
+      // K/RING/MAX_IOU_LIFETIME: the same UNCALIBRATED defaults as DeployV2.s.sol.
+      args: [tokenAddr, 3n, 16n, 86_400n],
+      account: deployer,
+      chain,
+    });
+    return (await pub.waitForTransactionReceipt({ hash: tx })).contractAddress!;
+  };
+
+  const token = await deployToken();
+  const hub = await deployHub(token);
+  const tokenEurc = await deployToken();
+  const hubEurc = await deployHub(tokenEurc);
+
+  // Router immutables pin the exact hub pair — the anvil world mirrors the
+  // testnet deployment shape one-for-one.
+  const routerTx = await wallet.deployContract({
+    abi: pvpRouterAbi,
+    bytecode: pvpRouterBytecode,
+    args: [hub, hubEurc],
+    account: deployer,
+    chain,
+  });
+  const router = (await pub.waitForTransactionReceipt({ hash: routerTx })).contractAddress!;
+
+  for (const p of personas) {
+    for (const t of [token, tokenEurc]) {
+      const mintHash = await wallet.writeContract({
+        address: t,
+        abi: mockTokenAbi,
+        functionName: "mint",
+        args: [p.account.address, parseUnits("100", 6)],
+        account: deployer,
+        chain,
+      });
+      await pub.waitForTransactionReceipt({ hash: mintHash });
+    }
   }
 
   const env = {
@@ -122,10 +175,17 @@ export async function setupAnvil(): Promise<DemoEnv> {
     hub,
     token,
     hubClient: new HubClient(hub, pub),
+    tokenEurc,
+    hubEurc,
+    hubClientEurc: new HubClient(hubEurc, pub),
+    router,
+    routerClient: new PvPRouterClient(router, rpcUrl),
     personas,
     relayerWallet: wallet,
   };
-  await depositAll(env, ANVIL_COLLATERAL);
+  // Pitfall 3: one depositAll call per (token, hub) pair — per-hub state stays separate.
+  await depositAll(env, { token, hub }, ANVIL_COLLATERAL);
+  await depositAll(env, { token: tokenEurc, hub: hubEurc }, ANVIL_COLLATERAL);
   return { ...env, anvil, explorerTx: (h) => h };
 }
 
@@ -137,9 +197,15 @@ export async function setupAnvil(): Promise<DemoEnv> {
  */
 export async function setupTestnet(): Promise<DemoEnv> {
   const hub = process.env.HUB_V2_USDC as Address | undefined;
+  const hubEurc = process.env.HUB_V2_EURC as Address | undefined;
+  const router = process.env.PVP_ROUTER as Address | undefined;
   const mnemonic = process.env.AGENT_MNEMONIC;
   const deployerPk = process.env.DEPLOYER_PK;
   if (!hub) throw new Error("HUB_V2_USDC not set — deploy ClearingHubV2 first (see README)");
+  if (!hubEurc) {
+    throw new Error("HUB_V2_EURC not set — deploy the EURC ClearingHubV2 first (see README)");
+  }
+  if (!router) throw new Error("PVP_ROUTER not set — deploy PvPRouter first (see README)");
   if (!mnemonic) throw new Error("AGENT_MNEMONIC not set");
   if (!deployerPk) throw new Error("DEPLOYER_PK not set");
 
@@ -150,8 +216,14 @@ export async function setupTestnet(): Promise<DemoEnv> {
   const deployer = privateKeyToAccount(deployerPk as `0x${string}`);
   const wallet = createWalletClient({ account: deployer, chain, transport: http() });
   const hubClient = new HubClient(hub, pub);
+  const hubClientEurc = new HubClient(hubEurc, pub);
+  const routerClient = new PvPRouterClient(router);
 
   const token = await hubClient.token();
+  // EURC on Arc is a plain ERC-20 (not the gas token) — agents' EURC funding
+  // and deposits are the deploy-phase concern (04-06 e2e:testnet), same as
+  // the USDC idempotent-deposit loop below covers the USDC side.
+  const tokenEurc = await hubClientEurc.token();
 
   // Top up each agent to ≥ 25 USDC (collateral + gas headroom).
   for (const p of personas) {
@@ -177,13 +249,26 @@ export async function setupTestnet(): Promise<DemoEnv> {
     }
   }
 
-  const env = { chain, pub, hub, token, hubClient, personas, relayerWallet: wallet };
+  const env = {
+    chain,
+    pub,
+    hub,
+    token,
+    hubClient,
+    tokenEurc,
+    hubEurc,
+    hubClientEurc,
+    router,
+    routerClient,
+    personas,
+    relayerWallet: wallet,
+  };
 
   // Deposit collateral only for agents that don't have any yet (idempotent).
   for (const p of personas) {
     const c = await hubClient.collateral(p.account.address);
     if (c === 0n) {
-      await depositAll({ ...env, personas: [p] }, TESTNET_COLLATERAL);
+      await depositAll({ ...env, personas: [p] }, { token, hub }, TESTNET_COLLATERAL);
     }
   }
 

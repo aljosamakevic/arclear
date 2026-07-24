@@ -24,8 +24,8 @@ export function agents(mnemonic: string): AgentPersona[] {
   return [
     { name: "Crawler", emoji: "🕷️", role: "sells raw web data", account: mk(1), stalled: false },
     { name: "Summarizer", emoji: "📝", role: "sells summaries, buys data", account: mk(2), stalled: false },
-    { name: "Oracle", emoji: "🔮", role: "sells signals, buys summaries", account: mk(3), stalled: false },
-    { name: "Trader", emoji: "📈", role: "buys signals, sells fills", account: mk(4), stalled: false },
+    { name: "Oracle", emoji: "🔮", role: "sells signals, buys summaries; pays its EU data desk in EURC, earns USDC (FX trader)", account: mk(3), stalled: false },
+    { name: "Trader", emoji: "📈", role: "buys signals, sells fills; runs the EURC↔USDC swap book against Oracle (FX trader)", account: mk(4), stalled: false },
     { name: "Auditor", emoji: "🧾", role: "buys fills, sells reports to Crawler", account: mk(5), stalled: false },
   ];
 }
