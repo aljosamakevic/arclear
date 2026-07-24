@@ -121,6 +121,24 @@ export class HubClient {
       .then(BigInt);
   }
 
+  /**
+   * RoundExecuted `roundHash` values logged for `roundNonce` since
+   * `fromBlock`. The logged roundHash IS the EIP-712 Round digest the
+   * participants signed, so a submitter whose receipt wait failed can decide
+   * "did MY round mine, or a concurrent one?" from chain state alone —
+   * the WR-01/WR-02 reconciliation primitive.
+   */
+  async roundExecutedHashes(roundNonce: bigint, fromBlock: bigint): Promise<Hex[]> {
+    const logs = await this.pub.getContractEvents({
+      address: this.hub,
+      abi: clearingHubV2Abi,
+      eventName: "RoundExecuted",
+      args: { roundNonce },
+      fromBlock,
+    });
+    return logs.flatMap((l) => (l.args.roundHash === undefined ? [] : [l.args.roundHash]));
+  }
+
   /** Nullifier check: has this IOU id already been redeemed on-chain? */
   redeemed(id: Hex): Promise<boolean> {
     return this.pub.readContract({

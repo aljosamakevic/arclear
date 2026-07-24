@@ -293,6 +293,10 @@ export type PvPAttemptOutcome =
       reason: string;
       /** Structured failure point — classification never parses reason strings. */
       stage: "quorum" | "consent" | "submit";
+      /** Present iff stage === "submit": exactly what was broadcast, so a
+       * chain-aware caller can reconcile "did it actually mine?" against
+       * RoundExecuted digests and fold it as settled (WR-01/WR-02). */
+      submitted?: { proposal: PvPProposal; results: { usdc: NetResult; eurc: NetResult } };
       excluded: Address[];
       passCount: 1 | 2;
       pass1: PvPConsentCollection;
@@ -392,11 +396,14 @@ export async function attemptPvPRound(args: {
       };
     } catch (e) {
       // Submission failure surfaces as data; the chain-aware wrapper
-      // classifies it from BOTH chains' nonces — never from this string.
+      // classifies it from RoundExecuted digests and BOTH chains' nonces —
+      // never from this string. `submitted` carries the broadcast bundle so
+      // that reconciliation can fold a mined-but-receipt-lost settlement.
       return {
         kind: "aborted",
         stage: "submit",
         reason: e instanceof Error ? e.message : String(e),
+        submitted: { proposal: p, results },
         excluded,
         passCount,
         pass1,
@@ -499,13 +506,28 @@ export interface PvPLegState {
   rounds: ExecutedRound[];
   hold(reason: string): void;
   release(): void;
+  /** WR-01: record this leg's in-flight submission BEFORE broadcast, so the
+   * state owner's own reconcile machinery (Coordinator's
+   * reconcilePendingSubmission) folds or discards it from RoundExecuted logs
+   * before its next round — even if this wrapper never returns. */
+  recordPendingSubmission(p: PvPPending & { txHash?: Hex }): void;
+  /** Drop the pending record once its outcome is known and folded (settled)
+   * or definitively nothing-executed (mined-and-reverted). */
+  clearPendingSubmission(): void;
 }
 
-/** One hub's injected dependencies: address, a HubClient-shaped nonce reader,
- *  and the coordinator (or equivalent) state surface. */
+/** One hub's injected dependencies: address, a HubClient-shaped reader
+ *  (live nonce + RoundExecuted digests), and the coordinator (or equivalent)
+ *  state surface. */
 export interface PvPLegDeps {
   hub: Address;
-  reader: { roundNonce(): Promise<bigint> };
+  reader: {
+    roundNonce(): Promise<bigint>;
+    /** RoundExecuted roundHash values for `roundNonce` since `fromBlock` —
+     * matched against the submitted leg digest to distinguish "our round
+     * executed" from "a concurrent one did" (WR-02). */
+    roundExecutedHashes(roundNonce: bigint, fromBlock: bigint): Promise<Hex[]>;
+  };
   state: PvPLegState;
 }
 
@@ -548,17 +570,22 @@ export type PvPRunResult =
  * Chain-aware PvP wrapper: hold BOTH hubs (Pitfall 4 — no ordinary round may
  * advance either nonce while the bundle is in flight), read both live nonces,
  * source the rate from the FX quote, run the chain-free attemptPvPRound with
- * a submit that records WR-01 pending state for BOTH hubs before
- * broadcasting, and classify any submission failure from the two chains'
- * nonces — never from error strings (WR-02). On settlement each hub's
- * settledIds absorbs ONLY its own leg's consumedIds and both coordinators'
- * rounds gain a PvP-tagged entry (per-hub state stays separate, Pitfall 3).
+ * a submit that records WR-01 pending state ON both coordinators before
+ * broadcasting, and classify any submission failure from chain state — first
+ * by matching each hub's RoundExecuted digest ("did OUR tx mine?"), then from
+ * the two chains' nonces — never from error strings (WR-02). On settlement
+ * each hub's settledIds absorbs ONLY its own leg's consumedIds and both
+ * coordinators' rounds gain a PvP-tagged entry (per-hub state stays separate,
+ * Pitfall 3).
  *
- * Residual note (WR-01 half): a receipt-transport failure (as opposed to a
- * definitive revert) leaves "did our tx mine?" open; the pending records
- * surfaced via onPending carry the digests a caller needs to reconcile
- * against RoundExecuted logs before its next round, exactly like the
- * single-hub reconcilePendingSubmission does.
+ * WR-01 (both halves): the pending records are persisted via each leg state's
+ * recordPendingSubmission BEFORE the broadcast — so even if this wrapper dies
+ * or misclassifies, each coordinator's own reconcilePendingSubmission folds
+ * or discards the leg from RoundExecuted logs before its next round; consumed
+ * ids can never be silently re-netted. A receipt-transport failure whose tx
+ * in fact mined is additionally reconciled HERE: both legs' logged roundHash
+ * matching the submitted digests reclassifies the run as settled and folds
+ * immediately. The optional onPending hook remains observability-only.
  */
 export async function runPvPRound(deps: PvPRunDeps): Promise<PvPRunResult> {
   const { usdc, eurc } = deps;
@@ -569,6 +596,58 @@ export async function runPvPRound(deps: PvPRunDeps): Promise<PvPRunResult> {
     const nonceU = await usdc.reader.roundNonce();
     const nonceE = await eurc.reader.roundNonce();
     const { fxNumerator, fxDenominator } = quoteToRate(deps.quote);
+
+    // What submit actually broadcast — the WR-01/WR-02 reconciliation record.
+    let inFlight:
+      | { pending: { usdc: PvPPending; eurc: PvPPending }; txHash?: Hex }
+      | undefined;
+
+    // Fold a CONFIRMED settlement into both hubs' state. Shared by the direct
+    // settled path and the digest-reconciled receipt-failure path (WR-02) so
+    // the two can never diverge. Clears both pending records: folded means
+    // there is nothing left to reconcile (WR-01).
+    const foldSettled = (
+      proposal: PvPProposal,
+      results: { usdc: NetResult; eurc: NetResult },
+      txHash: Hex,
+      excluded: Address[],
+      passCount: number,
+    ): PvPRunResult => {
+      const legRound = (leg: RoundProposal, result: NetResult): ExecutedRound => {
+        const deltas: Record<string, string> = {};
+        leg.participants.forEach((p, i) => {
+          deltas[p.toLowerCase()] = leg.deltas[i].toString();
+        });
+        return {
+          roundNonce: leg.roundNonce.toString(),
+          txHash,
+          manifestHash: leg.manifestHash,
+          participants: leg.participants.length,
+          grossVolume: result.grossVolume.toString(),
+          settledVolume: result.settledVolume.toString(),
+          iouCount: leg.consumedIds.length,
+          deltas,
+          excluded: excluded.map((a) => a.toLowerCase()),
+          passCount,
+          pvp: { fxNumerator: fxNumerator.toString(), fxDenominator: fxDenominator.toString() },
+        };
+      };
+      // Pitfall 3: each hub's settledIds absorbs ONLY its own leg (ids are
+      // hub-domain-separated by construction).
+      const roundU = legRound(proposal.usdcLeg, results.usdc);
+      const roundE = legRound(proposal.eurcLeg, results.eurc);
+      for (const id of proposal.usdcLeg.consumedIds) {
+        usdc.state.settledIds.add(id.toLowerCase() as Hex);
+      }
+      for (const id of proposal.eurcLeg.consumedIds) {
+        eurc.state.settledIds.add(id.toLowerCase() as Hex);
+      }
+      usdc.state.rounds.push(roundU);
+      eurc.state.rounds.push(roundE);
+      usdc.state.clearPendingSubmission();
+      eurc.state.clearPendingSubmission();
+      return { outcome: "settled", txHash, rounds: { usdc: roundU, eurc: roundE } };
+    };
 
     const attempt = await attemptPvPRound({
       usdc: {
@@ -593,11 +672,8 @@ export async function runPvPRound(deps: PvPRunDeps): Promise<PvPRunResult> {
       now: deps.now,
       chainId: deps.chainId,
       submit: async (proposal, legSigs, pvpSigs) => {
-        // WR-01 generalized: record the in-flight submission for BOTH hubs
-        // BEFORE broadcasting, so a failure can only ever be reconciled from
-        // chain state — never silently re-netted.
         const sentAtBlock = await deps.pub.getBlockNumber();
-        deps.onPending?.({
+        const pending = {
           usdc: {
             roundNonce: proposal.usdcLeg.roundNonce,
             digest: proposal.usdcLeg.digest,
@@ -610,17 +686,33 @@ export async function runPvPRound(deps: PvPRunDeps): Promise<PvPRunResult> {
             consumedIds: proposal.eurcLeg.consumedIds,
             sentAtBlock,
           },
-        });
+        };
+        // WR-01: persist the in-flight submission ON both coordinators BEFORE
+        // broadcasting — a receipt-transport failure (or a wrapper crash) can
+        // then only ever be reconciled from chain state by each coordinator's
+        // reconcilePendingSubmission; consumed ids are never silently
+        // re-netted. onPending stays a pure observability hook.
+        inFlight = { pending };
+        usdc.state.recordPendingSubmission({ ...pending.usdc });
+        eurc.state.recordPendingSubmission({ ...pending.eurc });
+        deps.onPending?.(pending);
         const txHash = await deps.routerClient.executePvP(
           deps.relayerWallet,
           proposal,
           legSigs,
           pvpSigs,
         );
+        inFlight.txHash = txHash;
+        usdc.state.recordPendingSubmission({ ...pending.usdc, txHash });
+        eurc.state.recordPendingSubmission({ ...pending.eurc, txHash });
         const receipt = await deps.pub.waitForTransactionReceipt({ hash: txHash });
         if (receipt.status !== "success") {
-          // Definitively mined-and-reverted — nothing executed on either hub.
+          // Definitively mined-and-reverted — nothing executed on either hub,
+          // nothing left to reconcile (mirrors the single-hub submit).
           // Classification below reads chain nonces (WR-02), never this string.
+          usdc.state.clearPendingSubmission();
+          eurc.state.clearPendingSubmission();
+          inFlight = undefined;
           throw new Error(`pvp tx reverted: ${txHash}`);
         }
         return txHash;
@@ -631,9 +723,38 @@ export async function runPvPRound(deps: PvPRunDeps): Promise<PvPRunResult> {
 
     if (attempt.kind === "aborted") {
       if (attempt.stage === "submit") {
-        // WR-02 generalized: classify the failure from BOTH chains' nonces.
-        // A moved nonce means a concurrent round executed on that hub —
-        // expected protocol behavior returned as data, not a fault.
+        // WR-02: FIRST ask "did OUR OWN tx actually mine?" — a receipt-
+        // transport failure after a successful broadcast advances both nonces
+        // by our own tx, so nonce comparison alone would mislabel a genuine
+        // settlement as blocked. The logged RoundExecuted roundHash IS the
+        // signed leg digest; both legs matching means the router executed our
+        // exact bundle (the router settles both legs atomically).
+        if (inFlight?.txHash !== undefined && attempt.submitted !== undefined) {
+          const { pending } = inFlight;
+          const [hashesU, hashesE] = await Promise.all([
+            usdc.reader.roundExecutedHashes(pending.usdc.roundNonce, pending.usdc.sentAtBlock),
+            eurc.reader.roundExecutedHashes(pending.eurc.roundNonce, pending.eurc.sentAtBlock),
+          ]);
+          const ourU = hashesU.some(
+            (h) => h.toLowerCase() === pending.usdc.digest.toLowerCase(),
+          );
+          const ourE = hashesE.some(
+            (h) => h.toLowerCase() === pending.eurc.digest.toLowerCase(),
+          );
+          if (ourU && ourE) {
+            return foldSettled(
+              attempt.submitted.proposal,
+              attempt.submitted.results,
+              inFlight.txHash,
+              attempt.excluded,
+              attempt.passCount,
+            );
+          }
+        }
+        // Then classify from BOTH chains' nonces: a moved nonce with a digest
+        // that is NOT ours means a concurrent round executed on that hub —
+        // expected protocol behavior returned as data, not a fault. Pending
+        // records (if any) stay on the coordinators for their own reconcile.
         const afterU = await usdc.reader.roundNonce();
         const afterE = await eurc.reader.roundNonce();
         if (afterU !== nonceU || afterE !== nonceE) {
@@ -648,40 +769,14 @@ export async function runPvPRound(deps: PvPRunDeps): Promise<PvPRunResult> {
       return { outcome: "aborted", reason: attempt.reason };
     }
 
-    // Settled: fold per-hub state — each hub absorbs ONLY its own leg
-    // (Pitfall 3: ids are hub-domain-separated by construction, and keeping
-    // the folds separate preserves each hub's reconciliation logic).
-    const { proposal, results } = attempt;
-    const legRound = (leg: RoundProposal, result: NetResult): ExecutedRound => {
-      const deltas: Record<string, string> = {};
-      leg.participants.forEach((p, i) => {
-        deltas[p.toLowerCase()] = leg.deltas[i].toString();
-      });
-      return {
-        roundNonce: leg.roundNonce.toString(),
-        txHash: attempt.txHash,
-        manifestHash: leg.manifestHash,
-        participants: leg.participants.length,
-        grossVolume: result.grossVolume.toString(),
-        settledVolume: result.settledVolume.toString(),
-        iouCount: leg.consumedIds.length,
-        deltas,
-        excluded: attempt.excluded.map((a) => a.toLowerCase()),
-        passCount: attempt.passCount,
-        pvp: { fxNumerator: fxNumerator.toString(), fxDenominator: fxDenominator.toString() },
-      };
-    };
-    const roundU = legRound(proposal.usdcLeg, results.usdc);
-    const roundE = legRound(proposal.eurcLeg, results.eurc);
-    for (const id of proposal.usdcLeg.consumedIds) {
-      usdc.state.settledIds.add(id.toLowerCase() as Hex);
-    }
-    for (const id of proposal.eurcLeg.consumedIds) {
-      eurc.state.settledIds.add(id.toLowerCase() as Hex);
-    }
-    usdc.state.rounds.push(roundU);
-    eurc.state.rounds.push(roundE);
-    return { outcome: "settled", txHash: attempt.txHash, rounds: { usdc: roundU, eurc: roundE } };
+    // Settled with a confirmed receipt — fold directly.
+    return foldSettled(
+      attempt.proposal,
+      attempt.results,
+      attempt.txHash,
+      attempt.excluded,
+      attempt.passCount,
+    );
   } finally {
     usdc.state.release();
     eurc.state.release();

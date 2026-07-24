@@ -388,6 +388,31 @@ export class Coordinator {
     this.holdReason = undefined;
   }
 
+  /**
+   * WR-01 (PvP half): record an externally-broadcast submission that consumes
+   * this hub's paper — the PvP wrapper calls this for its leg BEFORE
+   * broadcasting the router transaction. The record feeds the SAME
+   * reconcilePendingSubmission machinery ordinary rounds use: if the receipt
+   * transport fails mid-flight, the next runRound folds or discards the leg
+   * from RoundExecuted logs instead of silently re-netting consumed ids.
+   * Grants no authority — it can only make this instance MORE conservative.
+   */
+  recordPendingSubmission(p: {
+    roundNonce: bigint;
+    digest: Hex;
+    consumedIds: Hex[];
+    sentAtBlock: bigint;
+    txHash?: Hex;
+  }) {
+    this.pendingSubmission = p;
+  }
+
+  /** Drop the pending record — its outcome was confirmed and folded (or it
+   * definitively reverted with nothing executed). */
+  clearPendingSubmission() {
+    this.pendingSubmission = undefined;
+  }
+
   addIous(batch: SignedIou[]) {
     this.ious.push(...batch);
   }

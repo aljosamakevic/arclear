@@ -13,6 +13,7 @@ import {
   fxTradePair,
   runPvPRound,
   type PvPConsentProvider,
+  type PvPPending,
 } from "../demo/pvp.js";
 import { Coordinator, type ExecutedRound } from "../demo/coordinator.js";
 import type { PvPProposal, SignedIou } from "../src/types.js";
@@ -329,17 +330,29 @@ describe("runPvPRound (chain-aware wrapper)", () => {
       release() {
         this.held.pop();
       },
+      /** WR-01 recording surface: latest record + full call log (order matters). */
+      pending: undefined as (PvPPending & { txHash?: Hex }) | undefined,
+      pendingLog: [] as (PvPPending & { txHash?: Hex })[],
+      recordPendingSubmission(p: PvPPending & { txHash?: Hex }) {
+        this.pending = p;
+        this.pendingLog.push(p);
+      },
+      clearPendingSubmission() {
+        this.pending = undefined;
+      },
     };
   }
 
-  /** Stateful nonce reader: first read returns `first`, later reads `later`. */
-  function fakeReader(first: bigint, later?: bigint) {
+  /** Stateful nonce reader: first read returns `first`, later reads `later`.
+   *  `hashes(nonce)` supplies RoundExecuted roundHash "logs" — default none. */
+  function fakeReader(first: bigint, later?: bigint, hashes?: (nonce: bigint) => Hex[]) {
     let calls = 0;
     return {
       roundNonce: async () => {
         calls++;
         return calls === 1 ? first : (later ?? first);
       },
+      roundExecutedHashes: async (nonce: bigint, _fromBlock: bigint) => hashes?.(nonce) ?? [],
     };
   }
 
@@ -415,6 +428,9 @@ describe("runPvPRound (chain-aware wrapper)", () => {
     expect(stateE.settledIds.size).toBe(0);
     expect(stateU.rounds.length).toBe(0);
     expect(stateE.rounds.length).toBe(0);
+    // Definitively mined-and-reverted: nothing executed, nothing pending.
+    expect(stateU.pending).toBeUndefined();
+    expect(stateE.pending).toBeUndefined();
   });
 
   it("a reverted submission with unmoved nonces stays an abort (not blocked)", async () => {
@@ -437,6 +453,105 @@ describe("runPvPRound (chain-aware wrapper)", () => {
       now: NOW,
     });
     expect(out.outcome).toBe("aborted");
+    // Definitive revert clears the WR-01 pending records — nothing executed.
+    expect(stateU.pending).toBeUndefined();
+    expect(stateE.pending).toBeUndefined();
+  });
+
+  it("WR-02: a mined tx whose receipt wait fails is reconciled from RoundExecuted digests and folded as settled", async () => {
+    const { iousU, iousE } = await baseScenario();
+    const stateU = fakeLegState(iousU);
+    const stateE = fakeLegState(iousE);
+    // Each hub's "logs" report OUR OWN submitted digest at the submitted
+    // nonce — the tx really mined; only the receipt transport failed.
+    const readerU = fakeReader(NONCE_U, undefined, (nonce) =>
+      stateU.pending !== undefined && nonce === stateU.pending.roundNonce
+        ? [stateU.pending.digest]
+        : [],
+    );
+    const readerE = fakeReader(NONCE_E, undefined, (nonce) =>
+      stateE.pending !== undefined && nonce === stateE.pending.roundNonce
+        ? [stateE.pending.digest]
+        : [],
+    );
+    const out = await runPvPRound({
+      usdc: { hub: HUB_U, reader: readerU, state: stateU },
+      eurc: { hub: HUB_E, reader: readerE, state: stateE },
+      router: ROUTER,
+      routerClient: { executePvP: async () => TX },
+      relayerWallet: {} as WalletClient,
+      pub: {
+        getBlockNumber: async () => 42n,
+        waitForTransactionReceipt: async () => {
+          throw new Error("transport: socket hang up");
+        },
+      },
+      providers: honestProviders(iousU, iousE),
+      quote: QUOTE,
+      windowMs: WINDOW_MS,
+      now: NOW,
+    });
+    // Pre-fix this was "aborted"/"blocked" and the consumed ids stayed
+    // re-nettable — the double-settle hazard. Digest match reclassifies.
+    expect(out.outcome).toBe("settled");
+    if (out.outcome !== "settled") return;
+    expect(out.txHash).toBe(TX);
+    expect(out.rounds.usdc.pvp).toEqual({ fxNumerator: "989589", fxDenominator: "1000000" });
+    // Consumed ids folded per hub — never re-nettable (WR-01 goal).
+    expect(stateU.settledIds.size).toBeGreaterThan(0);
+    expect(stateE.settledIds.size).toBeGreaterThan(0);
+    expect(stateU.settledIds.size).toBe(out.rounds.usdc.iouCount);
+    expect(stateE.settledIds.size).toBe(out.rounds.eurc.iouCount);
+    // Recorded BEFORE broadcast (no txHash yet), re-recorded with the hash,
+    // and cleared once folded.
+    expect(stateU.pendingLog[0]?.txHash).toBeUndefined();
+    expect(stateU.pendingLog[1]?.txHash).toBe(TX);
+    expect(stateU.pending).toBeUndefined();
+    expect(stateE.pending).toBeUndefined();
+    // Held during flight, released after.
+    expect(stateU.held.length).toBe(0);
+    expect(stateE.held.length).toBe(0);
+  });
+
+  it("WR-01: a receipt-transport failure with no visible logs leaves reconcilable pending records on BOTH coordinators", async () => {
+    const { iousU, iousE } = await baseScenario();
+    const stateU = fakeLegState(iousU);
+    const stateE = fakeLegState(iousE);
+    const out = await runPvPRound({
+      usdc: { hub: HUB_U, reader: fakeReader(NONCE_U), state: stateU },
+      eurc: { hub: HUB_E, reader: fakeReader(NONCE_E), state: stateE },
+      router: ROUTER,
+      routerClient: { executePvP: async () => TX },
+      relayerWallet: {} as WalletClient,
+      pub: {
+        getBlockNumber: async () => 42n,
+        waitForTransactionReceipt: async () => {
+          throw new Error("transport: connection reset");
+        },
+      },
+      providers: honestProviders(iousU, iousE),
+      quote: QUOTE,
+      windowMs: WINDOW_MS,
+      now: NOW,
+    });
+    // "Did our tx mine?" is genuinely open (no logs, unmoved nonces): the run
+    // reports aborted as data …
+    expect(out.outcome).toBe("aborted");
+    // … but nothing is lost: both coordinators hold the full WR-01 pending
+    // record their own reconcilePendingSubmission needs before the next
+    // round — so the consumed ids can never be silently re-netted.
+    expect(stateU.pending?.roundNonce).toBe(NONCE_U);
+    expect(stateE.pending?.roundNonce).toBe(NONCE_E);
+    expect(stateU.pending?.txHash).toBe(TX);
+    expect(stateE.pending?.txHash).toBe(TX);
+    expect(stateU.pending?.sentAtBlock).toBe(42n);
+    expect(stateU.pending?.consumedIds.length).toBeGreaterThan(0);
+    expect(stateE.pending?.consumedIds.length).toBeGreaterThan(0);
+    // Nothing folded blindly.
+    expect(stateU.settledIds.size).toBe(0);
+    expect(stateE.settledIds.size).toBe(0);
+    expect(stateU.rounds.length).toBe(0);
+    expect(stateE.rounds.length).toBe(0);
   });
 
   it("hold blocks an ordinary Coordinator.runRound as a blocked-style result", async () => {
