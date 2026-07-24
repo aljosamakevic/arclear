@@ -68,3 +68,32 @@ export const ROUND_TYPES = {
     { name: "manifestHash", type: "bytes32" },
   ],
 } as const;
+
+/**
+ * EIP-712 domain for PvPRound bundles. The router — not a hub — is the
+ * verifying contract: a router deployment is permanently bound to one hub
+ * pair via constructor immutables, so a PvPRound signature in this domain is
+ * consent to legs on exactly that pair. Distinct name keeps wallet display
+ * and fixtures self-describing.
+ */
+export function pvpDomain(router: Address, chainId: number = ARC_TESTNET_CHAIN_ID) {
+  return {
+    name: "ArclearPvPRouter",
+    version: "1",
+    chainId,
+    verifyingContract: router,
+  } as const;
+}
+
+/**
+ * Canonical typehash (must byte-match PvPRouter.sol):
+ * PvPRound(bytes32 usdcLegDigest,bytes32 eurcLegDigest,uint256 fxNumerator,uint256 fxDenominator)
+ */
+export const PVP_TYPES = {
+  PvPRound: [
+    { name: "usdcLegDigest", type: "bytes32" },
+    { name: "eurcLegDigest", type: "bytes32" },
+    { name: "fxNumerator", type: "uint256" },
+    { name: "fxDenominator", type: "uint256" },
+  ],
+} as const;
