@@ -36,7 +36,10 @@ Netting fixes that other axis. Obligations accumulate off-chain as signed IOUs
 (a tab, with a limit); a round cancels offsetting *and cyclic* flows (A→B→C→A)
 and settles only residuals from pre-posted collateral. Working capital drops
 from turnover-sized to exposure-sized — the reason DTCC and CLS exist. And a
-hub clears **any ERC-20**: deploy one for USDC, one for EURC.
+hub clears **any ERC-20**: deploy one for USDC, one for EURC. Netting
+compresses obligations *within* a token; the `PvPRouter` composes two hubs
+*across* tokens — USDC and EURC legs settling atomically in one transaction,
+a miniature CLS.
 
 |                        | Gateway / x402 nanopayments | arclear netting            |
 | ---------------------- | --------------------------- | -------------------------- |

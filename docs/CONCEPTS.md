@@ -110,6 +110,10 @@ lockup and routing complexity; rollups and batching compress *transactions*,
 not *float*; traditional netting does compress float but only inside a
 permissioned operator. These compose rather than compete — net through
 Arclear, settle residuals over whatever rail you like, including Gateway.
+The same composition works across currencies: netting compresses obligations
+*within* a token, and the stateless `PvPRouter` composes the USDC and EURC
+hubs *across* tokens — both legs settle atomically in one transaction or
+neither does, a miniature CLS.
 
 ## 5. When netting is NOT worth it
 
