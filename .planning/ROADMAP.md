@@ -21,7 +21,7 @@ Arclear v2 evolves the shipped v1 netting primitive into a two-product clearing 
 
 - [x] **Phase 1: Threshold Consent (brief Phase 0)** - Exclude-and-recompute rounds keep settling through unresponsive members; unanimity over the final executed set (completed 2026-07-22)
 - [x] **Phase 2: Merkle Manifests & IOU Redemption (brief Phase 1)** - Sorted-leaf merkle manifest roots with inclusion/non-inclusion proofs and an on-chain `redeemIOU` recovery path (completed 2026-07-24)
-- [ ] **Phase 3: Calibration Checkpoint (brief checkpoint)** - Sweep-driven empirical answers: what member count threshold consent unlocks under realistic uptime; margin-parameter data recorded for the reference brief
+- [x] **Phase 3: Calibration Checkpoint (brief checkpoint)** - Sweep-driven empirical answers: what member count threshold consent unlocks under realistic uptime; margin-parameter data recorded for the reference brief (completed 2026-07-24)
 - [ ] **Phase 4: Cross-Currency PvP Rounds (brief Phase 6)** - USDC + EURC legs settle atomically with a per-round signed FX rate (miniature CLS)
 
 > **CCP arc removed (2026-07-24):** former Phases 4–7 (Novation, Margin, Default Waterfall, Membership) were removed from the roadmap by user decision — the CCP is a reference implementation, not a primitive others build on, and is decoupled from the submission's critical path (see Opus positioning review, 02-DISCUSSION context). `docs/V2-BRIEF.md` remains the vision artifact for that arc. Git history preserves the removed phase specs at commit `15fb231` and earlier.
@@ -131,7 +131,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2)*
 
-- [ ] 03-03-PLAN.md — EWMA margin coverage sweep (q x N grid + stress ramp) to `docs/sweep/margin-sweep.csv` + `docs/CALIBRATION.md` with recorded gate decision (wave 3)
+- [x] 03-03-PLAN.md — EWMA margin coverage sweep (q x N grid + stress ramp) to `docs/sweep/margin-sweep.csv` + `docs/CALIBRATION.md` with recorded gate decision (wave 3)
 
 Note: The original DECISION GATE was resolved by user decision on 2026-07-24 (skip the CCP arc). The sweep's value is now (a) the threshold-consent-under-uptime number for the showcase submission, and (b) documented calibration data backing `docs/V2-BRIEF.md` as the vision artifact.
 
@@ -157,5 +157,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4.
 |-------|----------------|--------|-----------|
 | 1. Threshold Consent | 5/5 | Complete    | 2026-07-22 |
 | 2. Merkle Manifests & IOU Redemption | 8/8 | Complete    | 2026-07-24 |
-| 3. Calibration Checkpoint | 2/3 | In Progress|  |
+| 3. Calibration Checkpoint | 3/3 | Complete   | 2026-07-24 |
 | 4. Cross-Currency PvP Rounds | 0/TBD | Not started | - |
