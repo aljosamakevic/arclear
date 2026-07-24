@@ -1,36 +1,18 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
 
-import {Test} from "forge-std/Test.sol";
-import {MockUSDC} from "./utils/RoundBuilder.sol";
-import {ClearingHubV2} from "../src/ClearingHubV2.sol";
+import {PvPRoundBuilder} from "./utils/PvPRoundBuilder.sol";
 import {PvPRouter} from "../src/PvPRouter.sol";
 
-/// @dev Smoke tests for the PvP router: constructor hub binding, PvPRound
-///      digest field sensitivity, and the zero-rate gate — the first checks
-///      of the executePvP revert matrix. The full matrix (leg digest
-///      mismatch, union verification, both-or-neither, single-leg direct
-///      submission, gas) lands in plan 04-04, which extends this file and
-///      migrates setUp into a shared PvPRoundBuilder harness — keep setUp
-///      minimal and reusable.
-contract PvPRouterTest is Test {
-    // Deploy defaults matching DeployV2 / RoundBuilderV2 (UNCALIBRATED, D-08).
-    uint64 internal constant K = 3;
-    uint64 internal constant RING = 16;
-    uint64 internal constant L = 86400;
-
-    MockUSDC internal usdc;
-    MockUSDC internal eurc;
-    ClearingHubV2 internal hubUSDC;
-    ClearingHubV2 internal hubEURC;
-    PvPRouter internal router;
-
+/// @dev PvP router suite over the dual-hub PvPRoundBuilder harness: smoke
+///      checks (constructor binding, digest sensitivity, zero-rate gate) plus
+///      the positive both-legs-settle path across all three participant-set
+///      regimes (overlapping, disjoint, identical — RESEARCH Q5). The full
+///      revert matrix, the single-leg limitation test, and gas measurement
+///      extend this contract in plan 04-04 tasks 2-3.
+contract PvPRouterTest is PvPRoundBuilder {
     function setUp() public {
-        usdc = new MockUSDC();
-        eurc = new MockUSDC(); // same mock shape; the hub only needs an ERC-20
-        hubUSDC = new ClearingHubV2(usdc, K, RING, L);
-        hubEURC = new ClearingHubV2(eurc, K, RING, L);
-        router = new PvPRouter(hubUSDC, hubEURC);
+        _setUpPvP();
     }
 
     // ---------------------------------------------------------- constructor
@@ -77,5 +59,124 @@ contract PvPRouterTest is Test {
         PvPRouter.Leg memory empty;
         vm.expectRevert(abi.encodeWithSelector(PvPRouter.ZeroRate.selector));
         router.executePvP(empty, empty, bytes32(0), bytes32(0), 989_589, 0, new bytes[](0));
+    }
+
+    // -------------------------------------------- executePvP: positive path
+
+    /// Full both-or-neither positive: BOTH hub nonces advance, every
+    /// collateral delta on BOTH hubs matches the signed leg exactly, and
+    /// PvPExecuted fires with the recomputed digests + rate.
+    function test_executePvP_bothLegsSettle() public {
+        PvPBundle memory b = _simplePvP("both-legs");
+
+        uint64 nU = hubUSDC.roundNonce();
+        uint64 nE = hubEURC.roundNonce();
+        uint256[] memory cU = new uint256[](3);
+        uint256[] memory cE = new uint256[](3);
+        for (uint256 i; i < 3; ++i) {
+            cU[i] = hubUSDC.collateral(b.usdcLeg.participants[i]);
+            cE[i] = hubEURC.collateral(b.eurcLeg.participants[i]);
+        }
+        bytes32 pvpDigest =
+            router.hashPvPRound(b.usdcDigest, b.eurcDigest, b.fxNumerator, b.fxDenominator);
+
+        vm.expectEmit(true, true, true, true, address(router));
+        emit PvPRouter.PvPExecuted(
+            b.usdcDigest, b.eurcDigest, b.fxNumerator, b.fxDenominator, pvpDigest
+        );
+        _submit(b);
+
+        assertEq(hubUSDC.roundNonce(), nU + 1, "USDC nonce must advance");
+        assertEq(hubEURC.roundNonce(), nE + 1, "EURC nonce must advance");
+        for (uint256 i; i < 3; ++i) {
+            assertEq(
+                hubUSDC.collateral(b.usdcLeg.participants[i]),
+                uint256(int256(cU[i]) + b.usdcLeg.deltas[i]),
+                "USDC collateral delta"
+            );
+            assertEq(
+                hubEURC.collateral(b.eurcLeg.participants[i]),
+                uint256(int256(cE[i]) + b.eurcLeg.deltas[i]),
+                "EURC collateral delta"
+            );
+        }
+    }
+
+    /// Disjoint participant sets: union = concatenation (RESEARCH Q5 — a
+    /// signer in one leg only still attests the bundle + rate).
+    function test_executePvP_disjointSets() public {
+        _fundAndDeposit(hubUSDC, usdc, actors[0], 5e6);
+        _fundAndDeposit(hubEURC, eurc, actors[2], 5e6);
+
+        address[] memory pU = new address[](2);
+        (pU[0], pU[1]) = (actors[0], actors[1]);
+        int256[] memory dU = new int256[](2);
+        (dU[0], dU[1]) = (int256(-1e6), int256(1e6));
+
+        address[] memory pE = new address[](2);
+        (pE[0], pE[1]) = (actors[2], actors[3]);
+        int256[] memory dE = new int256[](2);
+        (dE[0], dE[1]) = (int256(-1e6), int256(1e6));
+
+        PvPBundle memory b = _bundle(
+            hubUSDC.roundNonce(),
+            pU,
+            dU,
+            _manifest(2, "disjoint-usdc"),
+            hubEURC.roundNonce(),
+            pE,
+            dE,
+            _manifest(2, "disjoint-eurc"),
+            989_589,
+            1_000_000
+        );
+        assertEq(b.pvpSignatures.length, 4, "union must be the 4-member concatenation");
+
+        _submit(b);
+
+        assertEq(hubUSDC.roundNonce(), 1, "USDC nonce must advance");
+        assertEq(hubEURC.roundNonce(), 1, "EURC nonce must advance");
+        assertEq(hubUSDC.collateral(actors[0]), 4e6, "USDC debtor debited");
+        assertEq(hubUSDC.collateral(actors[1]), 1e6, "USDC creditor credited");
+        assertEq(hubEURC.collateral(actors[2]), 4e6, "EURC debtor debited");
+        assertEq(hubEURC.collateral(actors[3]), 1e6, "EURC creditor credited");
+    }
+
+    /// Identical participant sets: union == either set, one signature each.
+    function test_executePvP_identicalSets() public {
+        _fundAndDeposit(hubUSDC, usdc, actors[0], 5e6);
+        _fundAndDeposit(hubEURC, eurc, actors[2], 5e6);
+
+        address[] memory p = new address[](3);
+        (p[0], p[1], p[2]) = (actors[0], actors[1], actors[2]);
+        int256[] memory dU = new int256[](3);
+        (dU[0], dU[1], dU[2]) = (int256(-2e6), int256(1e6), int256(1e6));
+        int256[] memory dE = new int256[](3);
+        (dE[0], dE[1], dE[2]) = (int256(1e6), int256(1e6), int256(-2e6));
+
+        PvPBundle memory b = _bundle(
+            hubUSDC.roundNonce(),
+            p,
+            dU,
+            _manifest(2, "identical-usdc"),
+            hubEURC.roundNonce(),
+            p,
+            dE,
+            _manifest(2, "identical-eurc"),
+            989_589,
+            1_000_000
+        );
+        assertEq(b.pvpSignatures.length, 3, "union must collapse to the 3-member set");
+
+        _submit(b);
+
+        assertEq(hubUSDC.roundNonce(), 1, "USDC nonce must advance");
+        assertEq(hubEURC.roundNonce(), 1, "EURC nonce must advance");
+        assertEq(hubUSDC.collateral(actors[0]), 3e6, "USDC debtor debited");
+        assertEq(hubUSDC.collateral(actors[1]), 1e6, "USDC creditor credited");
+        assertEq(hubUSDC.collateral(actors[2]), 1e6, "USDC creditor credited (2)");
+        assertEq(hubEURC.collateral(actors[0]), 1e6, "EURC creditor credited");
+        assertEq(hubEURC.collateral(actors[1]), 1e6, "EURC creditor credited (2)");
+        assertEq(hubEURC.collateral(actors[2]), 3e6, "EURC debtor debited");
     }
 }
