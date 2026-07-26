@@ -254,9 +254,6 @@ export async function setupTestnet(): Promise<DemoEnv> {
   const routerClient = new PvPRouterClient(router);
 
   const token = await hubClient.token();
-  // EURC on Arc is a plain ERC-20 (not the gas token) — agents' EURC funding
-  // and deposits are the deploy-phase concern (04-06 e2e:testnet), same as
-  // the USDC idempotent-deposit loop below covers the USDC side.
   const tokenEurc = await hubClientEurc.token();
 
   // Top up each agent to ≥ 0.7 USDC (TESTNET_COLLATERAL + gas headroom).
@@ -324,6 +321,64 @@ export async function setupTestnet(): Promise<DemoEnv> {
     }
   }
 
+  // EURC funding mirrors the USDC pattern minus the gas margin: EURC on Arc
+  // is a plain ERC-20 (NOT the gas token — agents pay gas in USDC), so the
+  // per-agent target is exactly the EURC-hub collateral. Agents that already
+  // hold EURC-hub collateral need nothing (idempotent across boots). Same
+  // fail-loudly discipline as the USDC preflight above: the whole EURC
+  // shortfall is checked against the deployer BEFORE any broadcast, and —
+  // explicit gas skipping simulation — every funding receipt is asserted.
+  const eurcNeeded = new Map<Address, bigint>();
+  for (const p of personas) {
+    const deposited = await hubClientEurc.collateral(p.account.address);
+    if (deposited > 0n) continue; // already collateralized on the EURC hub
+    const bal = await pub.readContract({
+      address: tokenEurc,
+      abi: erc20Abi,
+      functionName: "balanceOf",
+      args: [p.account.address],
+    });
+    if (bal < TESTNET_COLLATERAL) eurcNeeded.set(p.account.address, TESTNET_COLLATERAL - bal);
+  }
+  const eurcShortfall = [...eurcNeeded.values()].reduce((sum, v) => sum + v, 0n);
+  if (eurcShortfall > 0n) {
+    const deployerEurc = await pub.readContract({
+      address: tokenEurc,
+      abi: erc20Abi,
+      functionName: "balanceOf",
+      args: [deployer.address],
+    });
+    if (deployerEurc < eurcShortfall) {
+      throw new Error(
+        `insufficient deployer EURC: agent top-ups need ${formatUnits(eurcShortfall, 6)} ` +
+          `EURC but deployer ${deployer.address} holds ${formatUnits(deployerEurc, 6)}. ` +
+          `Faucet at least ${formatUnits(eurcShortfall - deployerEurc, 6)} EURC to the ` +
+          `deployer (https://faucet.circle.com/ → Arc Testnet → EURC) and re-run.`,
+      );
+    }
+    for (const p of personas) {
+      const need = eurcNeeded.get(p.account.address);
+      if (need === undefined) continue;
+      const h = await wallet.writeContract({
+        address: tokenEurc,
+        abi: erc20Abi,
+        functionName: "transfer",
+        args: [p.account.address, need],
+        account: deployer,
+        chain,
+        maxFeePerGas: MIN_MAX_FEE_PER_GAS,
+        gas: 80_000n,
+      });
+      const receipt = await pub.waitForTransactionReceipt({ hash: h });
+      if (receipt.status !== "success") {
+        throw new Error(
+          `top-up transfer of ${formatUnits(need, 6)} EURC to ${p.name} ` +
+            `(${p.account.address}) reverted: tx ${h}`,
+        );
+      }
+    }
+  }
+
   const env = {
     chain,
     pub,
@@ -340,10 +395,21 @@ export async function setupTestnet(): Promise<DemoEnv> {
   };
 
   // Deposit collateral only for agents that don't have any yet (idempotent).
+  // Pitfall 3: one loop per (token, hub) pair — per-hub state stays separate.
   for (const p of personas) {
     const c = await hubClient.collateral(p.account.address);
     if (c === 0n) {
       await depositAll({ ...env, personas: [p] }, { token, hub }, TESTNET_COLLATERAL);
+    }
+  }
+  for (const p of personas) {
+    const c = await hubClientEurc.collateral(p.account.address);
+    if (c === 0n) {
+      await depositAll(
+        { ...env, personas: [p] },
+        { token: tokenEurc, hub: hubEurc },
+        TESTNET_COLLATERAL,
+      );
     }
   }
 
