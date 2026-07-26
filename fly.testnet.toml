@@ -1,0 +1,31 @@
+# Live testnet demo — Arclear dashboard settling REAL rounds on Arc Testnet.
+# Same Dockerfile as the sandbox app; [processes] overrides the image CMD
+# (drops --anvil) so demo/server.ts attaches to the deployed V2 hubs using
+# secrets (ARC_RPC_URL, DEPLOYER_PK, AGENT_MNEMONIC, HUB_V2_USDC, HUB_V2_EURC,
+# PVP_ROUTER, HUB_V2_DEPLOY_BLOCK) set via `flyctl secrets set` — never in git.
+app = "arclear-demo-testnet"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[processes]
+  # Fly process commands replace the Docker CMD and run through the image's
+  # ENTRYPOINT (node's docker-entrypoint.sh execs "$@") — testnet mode is
+  # simply the server without the --anvil flag.
+  app = "npx tsx demo/server.ts"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  processes = ["app"]
+  # Keep one machine warm: the testnet bootstrap makes real (idempotent)
+  # funding/deposit transactions and should not run on a visitor's first
+  # request. Button presses are rate-limited via DEMO_COOLDOWN_MS.
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"
