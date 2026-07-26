@@ -232,6 +232,11 @@ rounds](docs/PROTOCOL.md#cross-currency-pvp-rounds)):
 | -------- | ------- | ------ |
 | PvPRouter (hubUSDC `0x3b9a…5a16` · hubEURC `0xECcC…B85E`) | [`0x8287dD162e73f1a1DD15774dDc8A4137a2d3fE8c`](https://testnet.arcscan.app/address/0x8287dD162e73f1a1DD15774dDc8A4137a2d3fE8c) | source verified ✓ |
 
+Real cross-currency settlement through the router — a USDC leg and an EURC
+leg (FX trades at an agreed 0.9896 rate mixed with ordinary same-currency
+flows), both hubs advancing atomically in one transaction, 507,394 gas:
+[`0x05c64e…f66197`](https://testnet.arcscan.app/tx/0x05c64e9c1a9280989980240e89b4451c2b50fc945800fb7f28cdbebf8af66197)
+
 **Arclear Net v2 — Phase-1 hubs** (threshold consent only, no merkle
 manifests or redemption; superseded by the hubs above but still live
 on-chain):
