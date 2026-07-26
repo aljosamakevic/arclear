@@ -58,6 +58,26 @@ export function publicClient(rpcUrl?: string): PublicClient {
   return createPublicClient({ chain: arcTestnet, transport: http(rpcUrl) });
 }
 
+/**
+ * Max eth_getLogs span assumed servable in one request. Live Arc providers
+ * cap log queries (observed: "query exceeds max block range 100000") on top
+ * of pruning genesis history — so long scans must be windowed. 90,000 keeps
+ * margin under the observed cap.
+ */
+export const MAX_LOG_SCAN_SPAN = 90_000n;
+
+/** Inclusive [from, to] windows of at most `span` blocks covering from..to.
+ * Empty when to < from. A single window when the range fits — the anvil/test
+ * path (earliestBlock 0n, small chains) stays one request. */
+export function scanWindows(from: bigint, to: bigint, span: bigint): [bigint, bigint][] {
+  const windows: [bigint, bigint][] = [];
+  for (let start = from; start <= to; start += span) {
+    const end = start + span - 1n < to ? start + span - 1n : to;
+    windows.push([start, end]);
+  }
+  return windows;
+}
+
 export function walletClient(account: Account, rpcUrl?: string): WalletClient {
   return createWalletClient({ account, chain: arcTestnet, transport: http(rpcUrl) });
 }
@@ -81,10 +101,19 @@ function toAbiProof(p: NonInclusionProof) {
 
 /** Typed wrapper around one ClearingHubV2 deployment. */
 export class HubClient {
+  /** Lower bound for every unbounded event scan this client issues. Defaults
+   * to 0n (anvil/tests run against full-history nodes — behavior unchanged).
+   * The public Arc RPC prunes old history and rejects eth_getLogs from
+   * genesis, so live-testnet callers pass the hub's deploy block. */
+  readonly earliestBlock: bigint;
+
   constructor(
     readonly hub: Address,
     readonly pub: PublicClient,
-  ) {}
+    opts: { earliestBlock?: bigint } = {},
+  ) {
+    this.earliestBlock = opts.earliestBlock ?? 0n;
+  }
 
   collateral(participant: Address): Promise<bigint> {
     return this.pub.readContract({
@@ -190,13 +219,23 @@ export class HubClient {
    * which could serve a fabricated leaf set to break non-inclusion proofs.
    */
   async fetchManifest(nonce: bigint): Promise<Hex[]> {
-    const logs = await this.pub.getContractEvents({
-      address: this.hub,
-      abi: clearingHubV2Abi,
-      eventName: "RoundExecuted",
-      args: { roundNonce: nonce },
-      fromBlock: 0n,
-    });
+    // earliestBlock (hub deploy block on live Arc) floors the scan — the
+    // public RPC rejects from-genesis ranges as pruned history — and the
+    // range is windowed because live providers also cap per-request spans.
+    const latest = await this.pub.getBlockNumber();
+    const logs = [];
+    for (const [fromBlock, toBlock] of scanWindows(this.earliestBlock, latest, MAX_LOG_SCAN_SPAN)) {
+      logs.push(
+        ...(await this.pub.getContractEvents({
+          address: this.hub,
+          abi: clearingHubV2Abi,
+          eventName: "RoundExecuted",
+          args: { roundNonce: nonce },
+          fromBlock,
+          toBlock,
+        })),
+      );
+    }
     if (logs.length === 0) {
       throw new Error(`no RoundExecuted event for round nonce ${nonce} at hub ${this.hub}`);
     }

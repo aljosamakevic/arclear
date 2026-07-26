@@ -8,7 +8,7 @@ import {
   verifyConsent,
   verifyProposal,
 } from "../src/round.js";
-import { HubClient } from "../src/client.js";
+import { HubClient, MAX_LOG_SCAN_SPAN, scanWindows } from "../src/client.js";
 import { clearingHubV2Abi } from "../src/abi/ClearingHubV2.js";
 import type { NetResult, RoundProposal, SignedIou } from "../src/types.js";
 import type { AgentPersona } from "./agents.js";
@@ -376,6 +376,11 @@ export class Coordinator {
     opts: { consentWindowMs?: number } = {},
   ) {
     this.consentWindowMs = opts.consentWindowMs ?? 30_000;
+    // Redemption scans start at the hub client's earliestBlock, never at
+    // genesis — the public Arc RPC prunes old history and rejects
+    // fromBlock: 0 (anvil/tests keep the 0n default). The ?? guard keeps
+    // structurally-typed test stubs (cast without the field) at 0n.
+    this.redemptionScanBlock = hubClient.earliestBlock ?? 0n;
   }
 
   /** Freeze ordinary rounds (a PvP bundle is in flight on this hub pair). */
@@ -426,8 +431,9 @@ export class Coordinator {
     );
   }
 
-  /** Highest block already folded into redeemedIds; scans resume here. */
-  private redemptionScanBlock = 0n;
+  /** Highest block already folded into redeemedIds; scans resume here.
+   * Initialized in the constructor to hubClient.earliestBlock. */
+  private redemptionScanBlock: bigint;
 
   /**
    * D-14 (off-chain half): redemption happens OUTSIDE the coordinator — a
@@ -439,15 +445,25 @@ export class Coordinator {
    */
   private async reconcileRedeemedIds(): Promise<void> {
     const tip = await this.pub.getBlockNumber();
-    const logs = await this.pub.getContractEvents({
-      address: this.hub,
-      abi: clearingHubV2Abi,
-      eventName: "IouRedeemed",
-      fromBlock: this.redemptionScanBlock,
-    });
-    for (const l of logs) {
-      const id = l.args.id;
-      if (id) this.redeemedIds.add(id.toLowerCase() as Hex);
+    // Windowed scan: live Arc providers cap per-request log spans (and prune
+    // genesis history), and the first scan of a session starts back at the
+    // hub's deploy block. Later scans resume near the tip → single window.
+    for (const [fromBlock, toBlock] of scanWindows(
+      this.redemptionScanBlock,
+      tip,
+      MAX_LOG_SCAN_SPAN,
+    )) {
+      const logs = await this.pub.getContractEvents({
+        address: this.hub,
+        abi: clearingHubV2Abi,
+        eventName: "IouRedeemed",
+        fromBlock,
+        toBlock,
+      });
+      for (const l of logs) {
+        const id = l.args.id;
+        if (id) this.redeemedIds.add(id.toLowerCase() as Hex);
+      }
     }
     // Next scan re-covers the tip block — the Set fold is idempotent, so an
     // overlapping range can never double-count and a race can never skip.

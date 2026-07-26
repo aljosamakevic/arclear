@@ -185,7 +185,9 @@ Arc Testnet: copy `.env.example` → `.env`, set `ARC_RPC_URL`, `DEPLOYER_PK`
 (fund it at [faucet.circle.com](https://faucet.circle.com/) — on Arc, USDC is
 the native gas token with a 6-decimal ERC-20 facade at
 `0x3600000000000000000000000000000000000000`, so one faucet drip covers both
-gas and collateral), and `AGENT_MNEMONIC`. Then:
+gas and collateral), and `AGENT_MNEMONIC`. Set `HUB_V2_DEPLOY_BLOCK` (your V2
+USDC hub's deploy block, decimal) — the public RPC prunes old history, so
+event scans need a floor. Then:
 
 ```bash
 TOKEN_ADDRESS=0x3600000000000000000000000000000000000000 \
