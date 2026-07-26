@@ -49,6 +49,14 @@
   .stall-btn.stalled { background: var(--red); color: #0b0e14; border-color: var(--red); }
   .miss { font: 11px var(--mono); color: var(--amber); }
   .excl { font: 11px var(--mono); color: var(--red); }
+  .banner { display: none; font: 13px var(--mono); border-radius: 10px; padding: 10px 16px; margin-bottom: 18px; border: 1px solid var(--line); }
+  .banner a { font-weight: 600; }
+  .banner.anvil { display: block; background: var(--panel); color: var(--dim); }
+  .banner.anvil b { color: var(--amber); }
+  .banner.anvil a { color: var(--accent); }
+  .banner.testnet { display: block; background: rgba(52, 211, 153, 0.08); border-color: rgba(52, 211, 153, 0.35); color: var(--text); }
+  .banner.testnet b { color: var(--green); }
+  .banner.testnet a { color: var(--accent); }
   @media (max-width: 860px) { .hero { grid-template-columns: repeat(2, 1fr); } .grid { grid-template-columns: 1fr; } }
 </style>
 </head>
@@ -59,6 +67,8 @@
     <span class="badge" id="chainBadge">connecting…</span>
     <span class="badge" id="hubBadge"></span>
   </header>
+
+  <div class="banner" id="banner"></div>
 
   <div class="hero">
     <div class="stat"><div class="label">Gross obligations</div><div class="value" id="gross">—</div><div class="sub" id="iouCount">0 IOUs open</div></div>
@@ -101,6 +111,17 @@ const $ = (id) => document.getElementById(id);
 const usd = (base) => "$" + (Number(BigInt(base)) / 1e6).toFixed(2);
 const short = (a) => a.slice(0, 6) + "…" + a.slice(-4);
 let agentByAddr = {};
+let bannerMode = null;
+let cooldownNote = null; // { text, until } — set on a 429, shown until retry is allowed
+
+function renderBanner(mode) {
+  if (mode === bannerMode) return;
+  bannerMode = mode;
+  $("banner").className = "banner " + mode;
+  $("banner").innerHTML = mode === "anvil"
+    ? `<b>SANDBOX</b> · local anvil chain · no real funds · resets on restart · <a href="https://arclear-demo-testnet.fly.dev" target="_blank">also see the live testnet version →</a>`
+    : `<b>LIVE ARC TESTNET</b> · real settlements with faucet funds · every round is a real transaction · <a href="https://arclear-demo.fly.dev" target="_blank">also see the free-play sandbox →</a>`;
+}
 
 async function poll() {
   try {
@@ -109,6 +130,7 @@ async function poll() {
 
     $("chainBadge").textContent = s.chainId === 5042002 ? "Arc Testnet · 5042002" : `local anvil · ${s.chainId}`;
     $("hubBadge").textContent = "hub " + short(s.hub);
+    renderBanner(s.mode);
 
     const gross = BigInt(s.preview.grossVolume);
     const settled = BigInt(s.preview.settledVolume);
@@ -148,8 +170,8 @@ async function poll() {
       $("rounds").querySelector("tbody").innerHTML = s.rounds.map((r) => {
         const g = BigInt(r.grossVolume), st = BigInt(r.settledVolume);
         const comp = g === 0n ? "—" : (Number((g - st) * 1000n / g) / 10).toFixed(1) + "%";
-        const link = s.explorerBase
-          ? `<a href="${s.explorerBase}/tx/${r.txHash}" target="_blank">${short(r.txHash)} ↗</a>`
+        const link = s.explorerTxBase
+          ? `<a href="${s.explorerTxBase}${r.txHash}" target="_blank">${short(r.txHash)} ↗</a>`
           : short(r.txHash);
         // Exclusion rounds (passCount 2 / non-empty excluded) are visibly distinct (D-14).
         const excludedNames = (r.excluded ?? []).map((addr) => {
@@ -174,10 +196,11 @@ async function poll() {
       "collecting-consents-pass-2": "✍️ pass 2 · " + s.phaseDetail,
       "aborted": "🛑 aborted · " + s.phaseDetail,
       "submitting": "📡 submitting settlement…",
-      "confirmed": "✅ settled · " + (s.explorerBase ? `<a href="${s.explorerBase}/tx/${s.phaseDetail}" target="_blank">view on ArcScan ↗</a>` : short(s.phaseDetail)),
+      "confirmed": "✅ settled · " + (s.explorerTxBase ? `<a href="${s.explorerTxBase}${s.phaseDetail}" target="_blank">view on ArcScan ↗</a>` : short(s.phaseDetail)),
       "failed": "❌ " + (s.lastError ?? "failed"),
     };
-    $("phase").innerHTML = (s.simulating ? "🌀 traffic streaming… " : "") + (phases[s.phase] ?? "");
+    const cd = cooldownNote && Date.now() < cooldownNote.until ? cooldownNote.text + " · " : "";
+    $("phase").innerHTML = cd + (s.simulating ? "🌀 traffic streaming… " : "") + (phases[s.phase] ?? "");
   } catch (e) { $("phase").textContent = "⚠ server unreachable"; }
 }
 
@@ -186,10 +209,22 @@ async function toggleStall(name) {
   await fetch("/stall?agent=" + encodeURIComponent(name), { method: "POST" });
 }
 
-$("simulateBtn").onclick = async () => { await fetch("/simulate", { method: "POST" }); };
+// POST helper that treats 429 as a friendly cooldown notice, not an error
+// (the hosted testnet demo rate-limits button presses to protect faucet funds).
+async function postAction(path) {
+  const res = await fetch(path, { method: "POST" });
+  if (res.status === 429) {
+    const body = await res.json().catch(() => ({}));
+    const ms = Number(body.retryInMs ?? 3000);
+    cooldownNote = { text: `⏳ cooling down, retry in ${Math.ceil(ms / 1000)}s`, until: Date.now() + ms };
+    poll();
+  }
+}
+
+$("simulateBtn").onclick = async () => { await postAction("/simulate"); };
 $("roundBtn").onclick = async () => {
   $("roundBtn").disabled = true;
-  try { await fetch("/round", { method: "POST" }); } finally { $("roundBtn").disabled = false; }
+  try { await postAction("/round"); } finally { $("roundBtn").disabled = false; }
 };
 
 poll();
