@@ -42,6 +42,27 @@ const nonces = new Map<string, bigint>();
 let simulating = false;
 let roundInFlight = false;
 
+// Hosted-demo rate limit (off by default): global per-endpoint cooldown so the
+// public testnet instance can't be made to burn faucet funds in a tight loop.
+// Deliberately global (not per-IP) — dead simple, in-memory, resets on restart.
+const COOLDOWN_MS = Number(process.env.DEMO_COOLDOWN_MS ?? 0);
+const lastPostAt = new Map<string, number>();
+
+/** Returns ms until the endpoint is usable again, or 0 (and stamps it) if free. */
+function cooldown(endpoint: string): number {
+  if (COOLDOWN_MS <= 0) return 0;
+  const last = lastPostAt.get(endpoint);
+  const elapsed = last === undefined ? Infinity : Date.now() - last;
+  if (elapsed < COOLDOWN_MS) return COOLDOWN_MS - elapsed;
+  lastPostAt.set(endpoint, Date.now());
+  return 0;
+}
+
+// Base URL for linking tx hashes on the dashboard: null on anvil (nothing to
+// link to), the arcscan tx prefix on testnet. Derived from DemoEnv.explorerTx
+// so the server and printed reports can never disagree about the explorer.
+const explorerTxBase = mode === "anvil" ? null : env.explorerTx("");
+
 const dashboardPath = join(
   dirname(fileURLToPath(import.meta.url)),
   "..",
@@ -67,6 +88,7 @@ const server = createServer(async (req, res) => {
           token: env.token,
           chainId: env.chain.id,
           explorerBase: env.chain.id === 5042002 ? "https://testnet.arcscan.app" : null,
+          explorerTxBase,
           simulating,
           /** agent name -> stalled flag, straight from the live personas (D-13). */
           stalls: Object.fromEntries(env.personas.map((p) => [p.name, p.stalled])),
@@ -75,6 +97,12 @@ const server = createServer(async (req, res) => {
       return;
     }
     if (req.method === "POST" && req.url === "/simulate") {
+      const retryInMs = cooldown("/simulate");
+      if (retryInMs > 0) {
+        res.writeHead(429, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "cooling down", retryInMs }));
+        return;
+      }
       if (!simulating) {
         simulating = true;
         // fire-and-forget so the dashboard can watch IOUs stream in
@@ -116,6 +144,12 @@ const server = createServer(async (req, res) => {
       return;
     }
     if (req.method === "POST" && req.url === "/round") {
+      const retryInMs = cooldown("/round");
+      if (retryInMs > 0) {
+        res.writeHead(429, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "cooling down", retryInMs }));
+        return;
+      }
       // WR-03: one round at a time — a second concurrent /round would race
       // the coordinator's phase writes and burn relayer gas on a guaranteed
       // on-chain revert.
