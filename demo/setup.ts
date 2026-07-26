@@ -256,31 +256,45 @@ export async function setupTestnet(): Promise<DemoEnv> {
   const token = await hubClient.token();
   const tokenEurc = await hubClientEurc.token();
 
-  // Top up each agent to ≥ 0.7 USDC (TESTNET_COLLATERAL + gas headroom).
+  // Boot invariant: every agent enters the run holding >= TESTNET_COLLATERAL
+  // on BOTH hubs. Deposit-only-if-zero is not enough — settled rounds drift
+  // collateral run over run, and the demo traffic is deterministic, so an
+  // agent left below target reverts InsufficientCollateral at the SAME round
+  // every subsequent run. Topping the shortfall back up only ever ADDS
+  // collateral; the amounts and targets themselves never shrink to fit.
+  const usdcDepositNeed = new Map<Address, bigint>();
+  for (const p of personas) {
+    const c = await hubClient.collateral(p.account.address);
+    if (c < TESTNET_COLLATERAL) usdcDepositNeed.set(p.account.address, TESTNET_COLLATERAL - c);
+  }
+  const eurcDepositNeed = new Map<Address, bigint>();
+  for (const p of personas) {
+    const c = await hubClientEurc.collateral(p.account.address);
+    if (c < TESTNET_COLLATERAL) eurcDepositNeed.set(p.account.address, TESTNET_COLLATERAL - c);
+  }
+
+  // Top up each agent's USDC wallet to (deposit shortfall + gas reserve) —
+  // on Arc, USDC is the gas token AND the ERC-20, so one transfer funds both.
   // Preflight the WHOLE funding need against the deployer's balance BEFORE
   // broadcasting anything: an underfunded deployer's ERC-20 transfers revert,
   // and (explicit gas skips simulation) the only signal is the receipt
   // status — silently swallowing those reverts is exactly how all five
   // agents booted with collateral=0.
-  const TOPUP_TARGET = parseUnits("0.7", 6);
+  const GAS_RESERVE = parseUnits("0.2", 6); // per-agent gas budget (approves + deposits)
   // ~5 top-up transfers + a couple of executeRound submissions at 25 gwei.
   const DEPLOYER_GAS_HEADROOM = parseUnits("0.06", 6);
-  const agentBalance = new Map<Address, bigint>();
+  const usdcWalletNeed = new Map<Address, bigint>();
   for (const p of personas) {
-    agentBalance.set(
-      p.account.address,
-      await pub.readContract({
-        address: token,
-        abi: erc20Abi,
-        functionName: "balanceOf",
-        args: [p.account.address],
-      }),
-    );
+    const bal = await pub.readContract({
+      address: token,
+      abi: erc20Abi,
+      functionName: "balanceOf",
+      args: [p.account.address],
+    });
+    const target = (usdcDepositNeed.get(p.account.address) ?? 0n) + GAS_RESERVE;
+    if (bal < target) usdcWalletNeed.set(p.account.address, target - bal);
   }
-  const totalShortfall = personas.reduce((sum, p) => {
-    const bal = agentBalance.get(p.account.address)!;
-    return bal < TOPUP_TARGET ? sum + (TOPUP_TARGET - bal) : sum;
-  }, 0n);
+  const totalShortfall = [...usdcWalletNeed.values()].reduce((sum, v) => sum + v, 0n);
   if (totalShortfall > 0n) {
     const deployerBal = await pub.readContract({
       address: token,
@@ -299,13 +313,13 @@ export async function setupTestnet(): Promise<DemoEnv> {
       );
     }
     for (const p of personas) {
-      const bal = agentBalance.get(p.account.address)!;
-      if (bal >= TOPUP_TARGET) continue;
+      const amount = usdcWalletNeed.get(p.account.address);
+      if (amount === undefined) continue;
       const h = await wallet.writeContract({
         address: token,
         abi: erc20Abi,
         functionName: "transfer",
-        args: [p.account.address, TOPUP_TARGET - bal],
+        args: [p.account.address, amount],
         account: deployer,
         chain,
         maxFeePerGas: MIN_MAX_FEE_PER_GAS,
@@ -314,7 +328,7 @@ export async function setupTestnet(): Promise<DemoEnv> {
       const receipt = await pub.waitForTransactionReceipt({ hash: h });
       if (receipt.status !== "success") {
         throw new Error(
-          `top-up transfer of ${formatUnits(TOPUP_TARGET - bal, 6)} USDC to ${p.name} ` +
+          `top-up transfer of ${formatUnits(amount, 6)} USDC to ${p.name} ` +
             `(${p.account.address}) reverted: tx ${h}`,
         );
       }
@@ -323,24 +337,23 @@ export async function setupTestnet(): Promise<DemoEnv> {
 
   // EURC funding mirrors the USDC pattern minus the gas margin: EURC on Arc
   // is a plain ERC-20 (NOT the gas token — agents pay gas in USDC), so the
-  // per-agent target is exactly the EURC-hub collateral. Agents that already
-  // hold EURC-hub collateral need nothing (idempotent across boots). Same
+  // per-agent wallet target is exactly the EURC deposit shortfall. Same
   // fail-loudly discipline as the USDC preflight above: the whole EURC
   // shortfall is checked against the deployer BEFORE any broadcast, and —
   // explicit gas skipping simulation — every funding receipt is asserted.
-  const eurcNeeded = new Map<Address, bigint>();
+  const eurcWalletNeed = new Map<Address, bigint>();
   for (const p of personas) {
-    const deposited = await hubClientEurc.collateral(p.account.address);
-    if (deposited > 0n) continue; // already collateralized on the EURC hub
+    const target = eurcDepositNeed.get(p.account.address);
+    if (target === undefined) continue; // already at collateral target on the EURC hub
     const bal = await pub.readContract({
       address: tokenEurc,
       abi: erc20Abi,
       functionName: "balanceOf",
       args: [p.account.address],
     });
-    if (bal < TESTNET_COLLATERAL) eurcNeeded.set(p.account.address, TESTNET_COLLATERAL - bal);
+    if (bal < target) eurcWalletNeed.set(p.account.address, target - bal);
   }
-  const eurcShortfall = [...eurcNeeded.values()].reduce((sum, v) => sum + v, 0n);
+  const eurcShortfall = [...eurcWalletNeed.values()].reduce((sum, v) => sum + v, 0n);
   if (eurcShortfall > 0n) {
     const deployerEurc = await pub.readContract({
       address: tokenEurc,
@@ -357,7 +370,7 @@ export async function setupTestnet(): Promise<DemoEnv> {
       );
     }
     for (const p of personas) {
-      const need = eurcNeeded.get(p.account.address);
+      const need = eurcWalletNeed.get(p.account.address);
       if (need === undefined) continue;
       const h = await wallet.writeContract({
         address: tokenEurc,
@@ -394,22 +407,19 @@ export async function setupTestnet(): Promise<DemoEnv> {
     relayerWallet: wallet,
   };
 
-  // Deposit collateral only for agents that don't have any yet (idempotent).
-  // Pitfall 3: one loop per (token, hub) pair — per-hub state stays separate.
+  // Deposit each agent's shortfall back up to TESTNET_COLLATERAL (idempotent:
+  // agents already at target deposit nothing). Pitfall 3: one loop per
+  // (token, hub) pair — per-hub state stays separate.
   for (const p of personas) {
-    const c = await hubClient.collateral(p.account.address);
-    if (c === 0n) {
-      await depositAll({ ...env, personas: [p] }, { token, hub }, TESTNET_COLLATERAL);
+    const need = usdcDepositNeed.get(p.account.address);
+    if (need !== undefined && need > 0n) {
+      await depositAll({ ...env, personas: [p] }, { token, hub }, need);
     }
   }
   for (const p of personas) {
-    const c = await hubClientEurc.collateral(p.account.address);
-    if (c === 0n) {
-      await depositAll(
-        { ...env, personas: [p] },
-        { token: tokenEurc, hub: hubEurc },
-        TESTNET_COLLATERAL,
-      );
+    const need = eurcDepositNeed.get(p.account.address);
+    if (need !== undefined && need > 0n) {
+      await depositAll({ ...env, personas: [p] }, { token: tokenEurc, hub: hubEurc }, need);
     }
   }
 

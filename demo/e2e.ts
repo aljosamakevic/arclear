@@ -32,7 +32,12 @@ import { attemptPvPRound, fxTradePair, runPvPRound, type PvPConsentProvider } fr
 
 const mode = process.argv.includes("--anvil") ? "anvil" : "testnet";
 const now = () => BigInt(Math.floor(Date.now() / 1000));
-const divisor = mode === "anvil" ? 1n : 10n;
+// Testnet traffic scale: the round sequence is deterministic (seeded traffic),
+// so per-round deltas scale ~1/divisor and can be traced offline against the
+// faucet-funded TESTNET_COLLATERAL (0.5/hub). Measured minimum post-round
+// balance from a fresh 0.5 start: divisor 10 → -0.383 (reverts at the
+// liveness round — never runnable), 20 → +0.033 (too thin), 25 → +0.117.
+const divisor = mode === "anvil" ? 1n : 25n;
 
 let failures = 0;
 function check(cond: boolean, label: string) {
