@@ -268,6 +268,11 @@ npm run demo -- --anvil     # live dashboard at http://localhost:4402
 npm run e2e:anvil           # scripted end-to-end with balance assertions, ~20s
 ```
 
+No local setup at all: the same dashboard is hosted as a free-play sandbox at
+[arclear-demo.fly.dev](https://arclear-demo.fly.dev) and as a live Arc Testnet
+instance at [arclear-demo-testnet.fly.dev](https://arclear-demo-testnet.fly.dev)
+(real settlements against the hubs in section 2; rounds link to arcscan).
+
 ## 7. Where to go next
 
 - [CONCEPTS.md](CONCEPTS.md) — vocabulary, the two-layer capital model, why a

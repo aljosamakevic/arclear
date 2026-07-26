@@ -24,15 +24,26 @@ deploy.
 
 ## ▶ Try it live
 
-**[arclear-demo.fly.dev](https://arclear-demo.fly.dev)** — the live dashboard.
-Click **Simulate traffic**, then **Run netting round**, and watch ~100 signed
-IOUs collapse into a single settlement.
+Two hosted views of the same dashboard, cross-linked from their banners:
 
-This is a **sandbox**: it runs against an in-container [anvil](https://book.getfoundry.sh/anvil/)
-chain (not Arc Testnet), so there are no real funds, no keys, and it resets on
-restart — press every button freely. The dashboard and protocol code are
-identical to what settles on testnet; only the chain underneath differs. The
-live testnet contracts are listed under [Deployed hubs](#deployed-hubs-arc-testnet-chain-5042002) below.
+**[arclear-demo.fly.dev](https://arclear-demo.fly.dev)** — the **sandbox**.
+Click **Simulate traffic**, then **Run netting round**, and watch ~35 signed
+IOUs collapse into a single settlement. It runs against an in-container
+[anvil](https://book.getfoundry.sh/anvil/) chain: no real funds, no keys,
+resets on restart — press every button freely.
+
+**[arclear-demo-testnet.fly.dev](https://arclear-demo-testnet.fly.dev)** — the
+**live Arc Testnet** version. Same buttons, but every netting round is a real
+settlement on chain 5042002, paid from faucet funds, against the deployed V2
+hubs listed under [Deployed
+hubs](#deployed-hubs-arc-testnet-chain-5042002) below — each round's tx hash
+links straight to [arcscan](https://testnet.arcscan.app). Button presses are
+rate-limited (20 s cooldown) so a curious visitor can't drain the faucet
+budget.
+
+The dashboard and protocol code are identical in both; the difference is real:
+the sandbox settles on a throwaway chain, the testnet view spends actual
+(faucet) USDC on actual blocks.
 
 ## Why this exists
 
@@ -174,7 +185,7 @@ npm run e2e:anvil                                      # full flow, locally, ~20
 ```
 
 Live dashboard, locally (spawns anvil, deploys, funds five agents — the same
-thing [arclear-demo.fly.dev](https://arclear-demo.fly.dev) runs):
+thing the [arclear-demo.fly.dev](https://arclear-demo.fly.dev) sandbox runs):
 
 ```bash
 npm run demo -- --anvil
