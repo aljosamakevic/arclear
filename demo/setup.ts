@@ -4,6 +4,7 @@ import {
   createWalletClient,
   defineChain,
   erc20Abi,
+  formatUnits,
   http,
   parseUnits,
   type Address,
@@ -85,7 +86,16 @@ async function depositAll(
       account: p.account,
       ...fee,
     });
-    await env.pub.waitForTransactionReceipt({ hash: approveHash });
+    const approveReceipt = await env.pub.waitForTransactionReceipt({ hash: approveHash });
+    // Explicit gas skips simulation, so a revert only ever surfaces in the
+    // receipt status — swallowing it here is how agents silently ended up
+    // with zero collateral at boot.
+    if (approveReceipt.status !== "success") {
+      throw new Error(
+        `approve reverted for ${p.name} (${p.account.address}) on token ${target.token}: ` +
+          `tx ${approveHash}`,
+      );
+    }
     const depositHash = await wallet.writeContract({
       address: target.hub,
       abi: clearingHubV2Abi,
@@ -95,7 +105,14 @@ async function depositAll(
       account: p.account,
       ...fee,
     });
-    await env.pub.waitForTransactionReceipt({ hash: depositHash });
+    const depositReceipt = await env.pub.waitForTransactionReceipt({ hash: depositHash });
+    if (depositReceipt.status !== "success") {
+      throw new Error(
+        `deposit of ${formatUnits(collateralAmount, 6)} reverted for ${p.name} ` +
+          `(${p.account.address}) on hub ${target.hub}: tx ${depositHash} — check the ` +
+          `agent's token balance covers collateral + gas`,
+      );
+    }
   }
 }
 
@@ -215,8 +232,25 @@ export async function setupTestnet(): Promise<DemoEnv> {
   const { privateKeyToAccount } = await import("viem/accounts");
   const deployer = privateKeyToAccount(deployerPk as `0x${string}`);
   const wallet = createWalletClient({ account: deployer, chain, transport: http() });
-  const hubClient = new HubClient(hub, pub);
-  const hubClientEurc = new HubClient(hubEurc, pub);
+
+  // Event-scan floor: the public Arc RPC prunes old history and rejects
+  // eth_getLogs from genesis ("pruned history unavailable"). Use the V2 USDC
+  // hub's deploy block when known (HUB_V2_DEPLOY_BLOCK, decimal — the EURC
+  // hub deployed a few blocks later in the same broadcast session, so the
+  // USDC deploy block floors both hubs). Unset → latest − 1,000,000 clamped
+  // to ≥ 0: a pragmatic floor, far deeper than any live demo state yet
+  // shallow enough for the RPC's retention window.
+  const deployBlockEnv = process.env.HUB_V2_DEPLOY_BLOCK;
+  let earliestBlock: bigint;
+  if (deployBlockEnv !== undefined && deployBlockEnv !== "") {
+    earliestBlock = BigInt(deployBlockEnv);
+  } else {
+    const tip = await pub.getBlockNumber();
+    earliestBlock = tip > 1_000_000n ? tip - 1_000_000n : 0n;
+  }
+
+  const hubClient = new HubClient(hub, pub, { earliestBlock });
+  const hubClientEurc = new HubClient(hubEurc, pub, { earliestBlock });
   const routerClient = new PvPRouterClient(router);
 
   const token = await hubClient.token();
@@ -225,27 +259,68 @@ export async function setupTestnet(): Promise<DemoEnv> {
   // the USDC idempotent-deposit loop below covers the USDC side.
   const tokenEurc = await hubClientEurc.token();
 
-  // Top up each agent to ≥ 25 USDC (collateral + gas headroom).
+  // Top up each agent to ≥ 0.7 USDC (TESTNET_COLLATERAL + gas headroom).
+  // Preflight the WHOLE funding need against the deployer's balance BEFORE
+  // broadcasting anything: an underfunded deployer's ERC-20 transfers revert,
+  // and (explicit gas skips simulation) the only signal is the receipt
+  // status — silently swallowing those reverts is exactly how all five
+  // agents booted with collateral=0.
+  const TOPUP_TARGET = parseUnits("0.7", 6);
+  // ~5 top-up transfers + a couple of executeRound submissions at 25 gwei.
+  const DEPLOYER_GAS_HEADROOM = parseUnits("0.06", 6);
+  const agentBalance = new Map<Address, bigint>();
   for (const p of personas) {
-    const bal = await pub.readContract({
+    agentBalance.set(
+      p.account.address,
+      await pub.readContract({
+        address: token,
+        abi: erc20Abi,
+        functionName: "balanceOf",
+        args: [p.account.address],
+      }),
+    );
+  }
+  const totalShortfall = personas.reduce((sum, p) => {
+    const bal = agentBalance.get(p.account.address)!;
+    return bal < TOPUP_TARGET ? sum + (TOPUP_TARGET - bal) : sum;
+  }, 0n);
+  if (totalShortfall > 0n) {
+    const deployerBal = await pub.readContract({
       address: token,
       abi: erc20Abi,
       functionName: "balanceOf",
-      args: [p.account.address],
+      args: [deployer.address],
     });
-    const target = parseUnits("0.7", 6);
-    if (bal < target) {
+    const need = totalShortfall + DEPLOYER_GAS_HEADROOM;
+    if (deployerBal < need) {
+      throw new Error(
+        `insufficient deployer USDC: agent top-ups need ${formatUnits(totalShortfall, 6)} ` +
+          `USDC (+ ~${formatUnits(DEPLOYER_GAS_HEADROOM, 6)} gas headroom) but deployer ` +
+          `${deployer.address} holds ${formatUnits(deployerBal, 6)}. Faucet at least ` +
+          `${formatUnits(need - deployerBal, 6)} USDC to the deployer ` +
+          `(https://faucet.circle.com/ → Arc Testnet) and re-run.`,
+      );
+    }
+    for (const p of personas) {
+      const bal = agentBalance.get(p.account.address)!;
+      if (bal >= TOPUP_TARGET) continue;
       const h = await wallet.writeContract({
         address: token,
         abi: erc20Abi,
         functionName: "transfer",
-        args: [p.account.address, target - bal],
+        args: [p.account.address, TOPUP_TARGET - bal],
         account: deployer,
         chain,
         maxFeePerGas: MIN_MAX_FEE_PER_GAS,
         gas: 80_000n,
       });
-      await pub.waitForTransactionReceipt({ hash: h });
+      const receipt = await pub.waitForTransactionReceipt({ hash: h });
+      if (receipt.status !== "success") {
+        throw new Error(
+          `top-up transfer of ${formatUnits(TOPUP_TARGET - bal, 6)} USDC to ${p.name} ` +
+            `(${p.account.address}) reverted: tx ${h}`,
+        );
+      }
     }
   }
 
