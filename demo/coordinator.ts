@@ -1,5 +1,6 @@
 import type { Address, Hex } from "viem";
 import type { PublicClient, WalletClient } from "viem";
+import { iouId } from "../src/iou.js";
 import { net } from "../src/netting.js";
 import {
   buildProposal,
@@ -224,7 +225,9 @@ export async function attemptRound(args: {
     args;
   const opts = { now, settledIds, redeemedIds, chainId };
 
-  const result = net(openIous, opts);
+  // CR-01: bind the hub so every manifest leaf is DERIVED from the IOU we
+  // hold — a submitter-supplied `SignedIou.id` never reaches the manifest.
+  const result = net(openIous, { ...opts, hub });
   if (result.participants.length < 2) {
     return {
       outcome: "empty",
@@ -419,8 +422,19 @@ export class Coordinator {
     this.pendingSubmission = undefined;
   }
 
+  /**
+   * CR-01: re-derive every incoming id from (hub, iou) before the paper enters
+   * the pool. `net()` derives independently, so this is not what makes the
+   * manifest safe — it keeps the coordinator's OWN bookkeeping (openIous,
+   * settledIds folds, the dashboard's id column) keyed on the same id the
+   * manifest and the hub's nullifier use, instead of on whatever the submitter
+   * claimed.
+   */
   addIous(batch: SignedIou[]) {
-    this.ious.push(...batch);
+    for (const s of batch) {
+      const id = iouId(this.hub, s.iou, this.chainId);
+      this.ious.push(s.id === id ? s : { ...s, id });
+    }
   }
 
   /** IOUs not yet consumed by an executed round nor redeemed on-chain. */
@@ -743,6 +757,8 @@ export class Coordinator {
       now,
       settledIds: this.settledIds,
       redeemedIds: this.redeemedIds,
+      hub: this.hub,
+      chainId: this.chainId,
     });
     const collateral: Record<string, string> = {};
     for (const p of this.personas) {

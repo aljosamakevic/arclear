@@ -214,8 +214,8 @@ async function honestBundle(): Promise<Bundle> {
   const eurcIous = [
     await signIou(HUB_EURC, iou(bob.address, alice.address, FX_NUM, FX_REF), bob, undefined, at),
   ];
-  const usdcLeg = buildProposal(HUB_USDC, 0n, net(usdcIous, { now: NOW }));
-  const eurcLeg = buildProposal(HUB_EURC, 0n, net(eurcIous, { now: NOW }));
+  const usdcLeg = buildProposal(HUB_USDC, 0n, net(usdcIous, { now: NOW, hub: HUB_USDC }));
+  const eurcLeg = buildProposal(HUB_EURC, 0n, net(eurcIous, { now: NOW, hub: HUB_EURC }));
   const proposal = buildPvPProposal(ROUTER, usdcLeg, eurcLeg, FX_NUM, FX_DEN);
   return { usdcIous, eurcIous, usdcLeg, eurcLeg, proposal };
 }
@@ -301,8 +301,8 @@ describe("verifyPvPProposal", () => {
     const eurcIous = [
       await signIou(HUB_EURC, iou(alice.address, bob.address, FX_NUM, FX_REF), alice, undefined, at),
     ];
-    const usdcLeg = buildProposal(HUB_USDC, 0n, net(usdcIous, { now: NOW }));
-    const eurcLeg = buildProposal(HUB_EURC, 0n, net(eurcIous, { now: NOW }));
+    const usdcLeg = buildProposal(HUB_USDC, 0n, net(usdcIous, { now: NOW, hub: HUB_USDC }));
+    const eurcLeg = buildProposal(HUB_EURC, 0n, net(eurcIous, { now: NOW, hub: HUB_EURC }));
     const proposal = buildPvPProposal(ROUTER, usdcLeg, eurcLeg, FX_NUM, FX_DEN);
     const check = verifyPvPProposal(
       ROUTER, HUB_USDC, HUB_EURC, proposal, usdcIous, eurcIous, alice.address,
@@ -330,8 +330,8 @@ describe("verifyPvPProposal", () => {
     const pad = await signIou(
       HUB_EURC, iou(dave.address, carol.address, 10n, PLAIN_REF), dave, undefined, at,
     );
-    const usdcLeg = buildProposal(HUB_USDC, 0n, net([fxU], { now: NOW }));
-    const eurcLeg = buildProposal(HUB_EURC, 0n, net([pad], { now: NOW }));
+    const usdcLeg = buildProposal(HUB_USDC, 0n, net([fxU], { now: NOW, hub: HUB_USDC }));
+    const eurcLeg = buildProposal(HUB_EURC, 0n, net([pad], { now: NOW, hub: HUB_EURC }));
     const proposal = buildPvPProposal(ROUTER, usdcLeg, eurcLeg, FX_NUM, FX_DEN);
     // Attack preconditions hold: alice is in the USDC leg, stripped from the
     // EURC leg, and her counter-IOU is not consumed anywhere.
@@ -357,8 +357,8 @@ describe("verifyPvPProposal", () => {
     const padU = await signIou(
       HUB_USDC, iou(dave.address, carol.address, 10n, PLAIN_REF), dave, undefined, at,
     );
-    const usdcLeg2 = buildProposal(HUB_USDC, 0n, net([padU], { now: NOW }));
-    const eurcLeg2 = buildProposal(HUB_EURC, 0n, net([fxE], { now: NOW }));
+    const usdcLeg2 = buildProposal(HUB_USDC, 0n, net([padU], { now: NOW, hub: HUB_USDC }));
+    const eurcLeg2 = buildProposal(HUB_EURC, 0n, net([fxE], { now: NOW, hub: HUB_EURC }));
     const proposal2 = buildPvPProposal(ROUTER, usdcLeg2, eurcLeg2, FX_NUM, FX_DEN);
     const check2 = verifyPvPProposal(
       ROUTER, HUB_USDC, HUB_EURC, proposal2, [fxU], [fxE], alice.address,

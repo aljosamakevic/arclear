@@ -6,6 +6,7 @@ import {
 } from "viem";
 import type { Account } from "viem/accounts";
 import { pvpDomain, PVP_TYPES } from "./domain.js";
+import { iouId } from "./iou.js";
 import { verifyProposal } from "./round.js";
 import type { PvPProposal, RoundProposal, SignedIou } from "./types.js";
 
@@ -212,6 +213,40 @@ export function verifyPvPProposal(
     eurc?: LegVerifyOpts;
   },
 ): { ok: boolean; reason?: string } {
+  // CR-04 totality: same contract as verifyProposal, which this composes —
+  // a malformed leg must refuse the bundle, never crash the union member's
+  // consent loop.
+  try {
+    return verifyPvPProposalOrThrow(
+      router,
+      hubUsdc,
+      hubEurc,
+      proposal,
+      myIousUsdc,
+      myIousEurc,
+      self,
+      opts,
+    );
+  } catch (e) {
+    return { ok: false, reason: `malformed bundle: ${e instanceof Error ? e.message : e}` };
+  }
+}
+
+function verifyPvPProposalOrThrow(
+  router: Address,
+  hubUsdc: Address,
+  hubEurc: Address,
+  proposal: PvPProposal,
+  myIousUsdc: SignedIou[],
+  myIousEurc: SignedIou[],
+  self: Address,
+  opts: {
+    now: bigint;
+    chainId?: number;
+    usdc?: LegVerifyOpts;
+    eurc?: LegVerifyOpts;
+  },
+): { ok: boolean; reason?: string } {
   const selfLc = self.toLowerCase();
 
   // (1) Re-verify each leg the member belongs to — reason prefixed with the leg.
@@ -277,8 +312,11 @@ export function verifyPvPProposal(
     // other (padding that leg with unrelated paper to keep quorum) — the
     // per-leg verifyProposal above never runs for a leg the member was
     // stripped from, so this cross-leg check is the ONLY guard.
-    const uIn = usdcConsumed.has(uList[0].id.toLowerCase());
-    const eIn = eurcConsumed.has(eList[0].id.toLowerCase());
+    // CR-01: derive both ids from their own hub — a forged SignedIou.id would
+    // otherwise let a coordinator fake symmetry against a manifest that holds
+    // the real (derived) leaves.
+    const uIn = usdcConsumed.has(iouId(hubUsdc, u, opts.chainId).toLowerCase());
+    const eIn = eurcConsumed.has(iouId(hubEurc, e, opts.chainId).toLowerCase());
     if (uIn !== eIn) {
       const [inSide, outSide, outLeg] = uIn
         ? (["USDC", "EURC", "eurc"] as const)

@@ -12,6 +12,15 @@ const ADDRS: Address[] = Array.from(
   (_, i) => `0x${(i + 1).toString(16).padStart(40, "0")}` as Address,
 );
 
+/**
+ * These are ENGINE-ALGEBRA properties (zero-sum, shuffle determinism, dedup,
+ * expiry, ordering) over fabricated ids that are not EIP-712 digests, so the
+ * suite states the CR-01 binding explicitly as "trust the given ids". The
+ * derived-id path — the one every real caller uses — is covered by
+ * test/forgedId.test.ts.
+ */
+const UNBOUND = { unsafeTrustProvidedIds: true } as const;
+
 /** Test IOUs don't need real signatures — the engine keys on `id`. */
 function fakeIou(
   debtor: Address,
@@ -46,7 +55,7 @@ describe("netting engine properties", () => {
   it("deltas always sum to zero", () => {
     fc.assert(
       fc.property(arbIous, (ious) => {
-        const r = net(ious, { now: NOW });
+        const r = net(ious, { now: NOW, ...UNBOUND });
         expect(r.deltas.reduce((a, b) => a + b, 0n)).toBe(0n);
       }),
     );
@@ -61,7 +70,7 @@ describe("netting engine properties", () => {
           const j = (it_.next().value as number) % (i + 1);
           [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
         }
-        expect(net(shuffled, { now: NOW })).toEqual(net(ious, { now: NOW }));
+        expect(net(shuffled, { now: NOW, ...UNBOUND })).toEqual(net(ious, { now: NOW, ...UNBOUND }));
       }),
     );
   });
@@ -70,7 +79,7 @@ describe("netting engine properties", () => {
     fc.assert(
       fc.property(arbIous, (ious) => {
         const doubled = [...ious, ...ious];
-        expect(net(doubled, { now: NOW })).toEqual(net(ious, { now: NOW }));
+        expect(net(doubled, { now: NOW, ...UNBOUND })).toEqual(net(ious, { now: NOW, ...UNBOUND }));
       }),
     );
   });
@@ -82,8 +91,8 @@ describe("netting engine properties", () => {
           const iou = { ...s.iou, expiry: NOW - 1n };
           return { ...s, iou, id: keccak256(toHex(`expired|${s.id}`)) as Hex };
         });
-        expect(net([...live, ...expired], { now: NOW })).toEqual(
-          net(live, { now: NOW }),
+        expect(net([...live, ...expired], { now: NOW, ...UNBOUND })).toEqual(
+          net(live, { now: NOW, ...UNBOUND }),
         );
       }),
     );
@@ -92,7 +101,7 @@ describe("netting engine properties", () => {
   it("already-settled ids are excluded", () => {
     const a = fakeIou(ADDRS[0], ADDRS[1], 5n, 1n);
     const b = fakeIou(ADDRS[1], ADDRS[0], 3n, 1n);
-    const r = net([a, b], { now: NOW, settledIds: new Set([a.id]) });
+    const r = net([a, b], { now: NOW, ...UNBOUND, settledIds: new Set([a.id]) });
     expect(r.consumedIds).toEqual([b.id.toLowerCase()]);
     expect(r.grossVolume).toBe(3n);
   });
@@ -100,7 +109,7 @@ describe("netting engine properties", () => {
   it("participants are strictly ascending", () => {
     fc.assert(
       fc.property(arbIous, (ious) => {
-        const { participants } = net(ious, { now: NOW });
+        const { participants } = net(ious, { now: NOW, ...UNBOUND });
         for (let i = 1; i < participants.length; i++) {
           expect(
             participants[i - 1].toLowerCase() < participants[i].toLowerCase(),
@@ -116,7 +125,7 @@ describe("netting engine properties", () => {
       fakeIou(ADDRS[0], ADDRS[1], 5n, 1n),
       fakeIou(ADDRS[1], ADDRS[2], 5n, 1n),
     ];
-    const r = net(ious, { now: NOW });
+    const r = net(ious, { now: NOW, ...UNBOUND });
     expect(r.participants).toHaveLength(3);
     const idx = r.participants.findIndex(
       (p) => p.toLowerCase() === ADDRS[1].toLowerCase(),
@@ -128,7 +137,7 @@ describe("netting engine properties", () => {
   it("settledVolume equals sum of positive deltas and never exceeds gross", () => {
     fc.assert(
       fc.property(arbIous, (ious) => {
-        const r = net(ious, { now: NOW });
+        const r = net(ious, { now: NOW, ...UNBOUND });
         const pos = r.deltas.filter((d) => d > 0n).reduce((a, b) => a + b, 0n);
         expect(r.settledVolume).toBe(pos);
         expect(r.settledVolume <= r.grossVolume).toBe(true);
@@ -143,7 +152,7 @@ describe("netting engine properties", () => {
       fakeIou(ADDRS[1], ADDRS[2], 7n, 1n),
       fakeIou(ADDRS[2], ADDRS[0], 7n, 1n),
     ];
-    const r = net(ious, { now: NOW });
+    const r = net(ious, { now: NOW, ...UNBOUND });
     expect(r.grossVolume).toBe(21n);
     expect(r.settledVolume).toBe(0n);
     expect(r.deltas.every((d) => d === 0n)).toBe(true);

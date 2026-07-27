@@ -1,11 +1,30 @@
 import type { Address, Hex } from "viem";
+import { iouId } from "./iou.js";
 import type { NetResult, SignedIou } from "./types.js";
+
+/**
+ * How `net()` establishes each IOU's id. Exactly one of the two shapes is
+ * required — the binding is never implicit (CR-01).
+ *
+ * - `{ hub }`: ids are DERIVED from (hub, iou, chainId). A caller-supplied
+ *   `SignedIou.id` is ignored entirely. This is the only safe mode for real
+ *   paper: the id is the manifest leaf, and a manifest committing to a forged
+ *   id leaves the real id un-nullified for a later redeemIOU double-debit.
+ * - `{ unsafeTrustProvidedIds: true }`: ids are taken verbatim from the input.
+ *   ONLY for synthetic/simulation pools whose ids are not EIP-712 digests at
+ *   all (demo/flowModel.ts, demo/thresholdModel.ts). Never for signed paper.
+ */
+export type NetIdBinding =
+  | { hub: Address; chainId?: number; unsafeTrustProvidedIds?: never }
+  | { hub?: never; chainId?: number; unsafeTrustProvidedIds: true };
 
 /**
  * Deterministic multilateral netting. Pure function; bigint arithmetic only —
  * there is no division anywhere in the protocol.
  *
  * Rules (spec: docs/PROTOCOL.md — third parties must implement identically):
+ * 0. Ids are derived from (hub, iou), never read from the input, unless the
+ *    caller explicitly opts into `unsafeTrustProvidedIds` (CR-01).
  * 1. Dedup by IOU id (identical ids are the same obligation).
  * 2. Drop expired: `expiry <= now + safetyWindow`.
  * 3. Drop already-settled ids (present in `settledIds`) and redeemed ids
@@ -27,11 +46,12 @@ export function net(
     safetyWindowSeconds?: bigint;
     settledIds?: ReadonlySet<Hex>;
     redeemedIds?: ReadonlySet<Hex>;
-  },
+  } & NetIdBinding,
 ): NetResult {
   const safety = opts.safetyWindowSeconds ?? 60n;
   const settled = opts.settledIds ?? new Set<Hex>();
   const redeemed = opts.redeemedIds ?? new Set<Hex>();
+  const hub = opts.hub;
 
   const seen = new Set<Hex>();
   const positions = new Map<string, bigint>(); // lowercase address -> delta
@@ -40,7 +60,11 @@ export function net(
   let grossVolume = 0n;
 
   for (const s of ious) {
-    const id = s.id.toLowerCase() as Hex;
+    // rule 0: derive, never trust — the forged id would otherwise become the
+    // manifest leaf while the real id stayed redeemable (CR-01).
+    const id = (
+      hub === undefined ? s.id : iouId(hub, s.iou, opts.chainId)
+    ).toLowerCase() as Hex;
     if (seen.has(id)) continue; // rule 1
     seen.add(id);
     if (s.iou.expiry <= opts.now + safety) continue; // rule 2

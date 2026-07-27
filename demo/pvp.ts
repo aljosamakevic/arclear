@@ -331,11 +331,14 @@ export async function attemptPvPRound(args: {
 }): Promise<PvPAttemptOutcome> {
   const { usdc, eurc, router, fxNumerator, fxDenominator, providers, windowMs, now, chainId } =
     args;
+  // CR-01: each leg carries its own hub, so both legs' ids are derived from
+  // the hub they were signed against (ids are hub-domain-separated, Pitfall 3).
   const legOpts = (leg: PvPLegArgs) => ({
     now,
     settledIds: leg.settledIds,
     redeemedIds: leg.redeemedIds,
     chainId,
+    hub: leg.hub,
   });
 
   const resultU = net(usdc.ious, legOpts(usdc));

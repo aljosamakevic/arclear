@@ -206,7 +206,11 @@ export function simulateThresholdHistory(params: ThresholdParams): ThresholdHist
     }
 
     // 2. Candidate netting over the open pool (rule 3 drops settled ids).
-    const result = net(openPool, { now: NOW, settledIds });
+    // Synthetic round-tagged ids, never EIP-712 digests: this model settles
+    // nothing and signs nothing, so it opts out of CR-01 id derivation
+    // explicitly (and stays fast enough for the ~1M simulated rounds CALB-01
+    // needs). Every path that touches real paper MUST bind a hub instead.
+    const result = net(openPool, { now: NOW, settledIds, unsafeTrustProvidedIds: true });
 
     // 3. Mirror attemptRound's exact check: participant count, not deltas.
     if (result.participants.length < 2) {
@@ -234,7 +238,7 @@ export function simulateThresholdHistory(params: ThresholdParams): ThresholdHist
     const filtered = openPool.filter(
       (s) => !ex.has(s.iou.debtor.toLowerCase()) && !ex.has(s.iou.creditor.toLowerCase()),
     );
-    const rebuilt = net(filtered, { now: NOW, settledIds });
+    const rebuilt = net(filtered, { now: NOW, settledIds, unsafeTrustProvidedIds: true });
     if (rebuilt.participants.length < 2) {
       records.push(nonSettlingRecord("aborted", excluded)); // quorum floor (D-01)
       continue;

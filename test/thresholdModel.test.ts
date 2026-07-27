@@ -50,7 +50,8 @@ describe("thresholdModel attemptRound-mirroring behaviors", () => {
     let pool: SignedIou[] = [];
     h.records.forEach((rec, r) => {
       pool = pool.concat(roundFlowBatch(params.seed, r, params));
-      const direct = net(pool, { now: NOW, settledIds });
+      // Same id binding the model uses (synthetic round-tagged ids, CR-01).
+      const direct = net(pool, { now: NOW, settledIds, unsafeTrustProvidedIds: true });
       expect(rec.kind).toBe("settled-1pass");
       expect(rec.excluded).toEqual([]);
       expect(rec.settledVolume).toBe(direct.settledVolume);

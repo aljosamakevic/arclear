@@ -63,7 +63,11 @@ export function generateFlows(p: FlowParams): SignedIou[] {
           amount,
           nonce: BigInt(counter),
           expiry: FUTURE,
-          ref: "0x0" as Hex,
+          // Well-formed bytes32: the Iou struct's ref is an EIP-712 bytes32
+          // field, so a short hex here makes the struct unhashable the moment
+          // anything derives its id (CR-01). Netting ignores ref, so this is
+          // output-neutral for every sweep that consumes these flows.
+          ref: `0x${"0".repeat(64)}` as Hex,
         },
         signature: "0x" as Hex,
         id: `0x${counter.toString(16).padStart(64, "0")}` as Hex,
