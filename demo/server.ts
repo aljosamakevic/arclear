@@ -113,7 +113,20 @@ const server = createServer(async (req, res) => {
             const batch = await simulateTraffic(env.hub, env.personas, 35, {
               now: now(),
               chainId: env.chain.id,
-              amountDivisor: mode === "anvil" ? 1n : 10n,
+              // C-CR-01: traffic scale must stay inside the faucet-funded
+              // TESTNET_COLLATERAL (0.5/hub = 500,000 base units). The bursts
+              // are seeded deterministically (`traffic-${k}`), so every press
+              // adds the SAME delta vector and debits accumulate linearly.
+              // Traced offline over repeated presses (matches demo/e2e.ts:40,
+              // which rejected 10 for the same reason):
+              //   divisor 10 → worst debit -642,987 after 3 presses → REVERTS
+              //                (press+round interleaved: reverts at round 3)
+              //   divisor 25 → worst debit -428,645 after 5 presses → ok
+              //                (press+round interleaved: reverts at round 6)
+              // 25 keeps the hosted demo runnable for a visitor session; the
+              // structural cure (collateral-aware scale / submit preflight)
+              // is tracked separately. Anvil is 20/hub — no scaling needed.
+              amountDivisor: mode === "anvil" ? 1n : 25n,
               startNonce: nonces,
             });
             for (const iou of batch) {
