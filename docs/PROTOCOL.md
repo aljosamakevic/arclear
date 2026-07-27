@@ -489,8 +489,13 @@ pass honestly. The rule that prevents it needs no new signed field:
   expiry.
 - **Therefore:** when `executedAt(oldest buffered) < expiry − L`, every
   round that could possibly have consumed the IOU is still buffered, and the
-  full proof set is complete — **net → cannot-redeem holds unconditionally
-  for any IOU signed under the convention**.
+  full proof set is complete — **net → cannot-redeem holds for any IOU signed
+  under the convention**. Note the direction: this argues that a *netted* IOU
+  cannot also be redeemed. It does **not** argue the converse, and the
+  converse is false on the deployed hubs — an id can be a leaf of a buffered
+  root without ever having been netted, because `executeRound` never binds a
+  consumed id to the round's participants (see "Known-broken on the deployed
+  hubs" below).
 - **Incentive-safe against violation:** only the debtor signs IOUs, and
   double-claiming only debits the debtor — a debtor who signs
   `expiry > signTime + L` weakens *only their own* double-claim protection.
@@ -515,6 +520,64 @@ both directions (and invariant-tested on real chain state):
 - **Net → cannot-redeem:** a consumed id is a leaf of some buffered root, so
   its non-inclusion proof against that root cannot exist; the coverage rule
   guarantees the containing round is still buffered for honest debtors.
+  **This is one-way only.** "Leaf of a buffered root" does *not* imply "was
+  actually netted": nothing on-chain ties a `consumedIds` entry to the round's
+  participants, so an id can be made unredeemable without ever having settled.
+  Read the next section before treating redemption as a bound on exposure.
+
+### Known-broken on the deployed hubs
+
+Two defects found in the 2026-07-27 audit make `redeemIOU` **defeatable by any
+party, permanently, for a few hundred thousand gas** on the live
+`ClearingHubV2` deployments. Both were reproduced against the shipped
+contract. Neither can be fixed off-chain — no SDK, coordinator or ops change
+restores redemption — so they are stated here rather than worked around.
+
+**What is NOT affected, stated first so this is not misread as a safety
+break:** settlement safety, zero-sum, and the signed-consent invariant are
+untouched. No balance moves without that address's EIP-712 signature over the
+exact executed `(nonce, participants, deltas, root)` tuple; both attacks
+execute rounds in which every delta is zero and every participant signed. The
+damage is confined to the recovery product.
+
+1. **`consumedIds` is unbound (manifest poisoning).** `executeRound` commits
+   the merkle root of `consumedIds` but never checks that a consumed id has
+   anything to do with the round's participants — no debtor/creditor
+   recovery, no ownership binding, no consumption ledger. The only constraints
+   are strict ascent and "not already redeemed". And a round is **free**:
+   `n = 2` with `deltas = [0, 0]` sums to zero and takes the `delta >= 0`
+   branch, so neither address needs a base unit of collateral, and no IOU has
+   to exist. Two throwaway addresses can therefore commit any id. Since
+   `redeemIOU` demands a non-inclusion proof against every buffered root, and
+   no such proof exists for a genuine leaf, **writing a victim's IOU id into
+   any round's manifest permanently destroys that IOU's redeemability.** The
+   debtor is the natural attacker — they know every id they ever signed, and
+   one transaction covers all of them. Measured (`gasleft()` deltas,
+   excluding the ~21k intrinsic tx cost): **136,762 gas** for a first free
+   round with an empty manifest, **~3,808 gas per additional poisoned id**.
+2. **Free rounds flush the root ring.** Every `executeRound` unconditionally
+   writes `rootRing[nonce % RING] = (root, nonce, block.timestamp)` and
+   increments `roundNonce`. The coverage gate reverts when
+   `oldestExecutedAt >= expiry − L`; `oldestExecutedAt` only ever rises while
+   `expiry − L` is fixed by the IOU. So an attacker who rewrites all `RING`
+   slots closes the window **permanently** — verified still reverting after
+   warping seven days forward and regenerating proofs. This one is global: a
+   party with no relationship to anyone kills redemption for *every*
+   outstanding IOU on that hub, against *every* debtor, at once. Measured:
+   **1,053,610 gas** to flush all 16 slots (~65.9k per round). It survives a
+   fix to (1) — it attacks the ring, not the manifest.
+
+**Consequence for integrators, plainly: on the currently deployed hubs, size
+credit exposure on bilateral credit caps plus the debtor's posted collateral
+alone. Treat `redeemIOU` as worth zero.**
+
+The fixes are on-chain and land in the next deploy. Binding each consumed id
+to a listed participant addresses (1); making rounds non-free *and*
+time-indexing the ring addresses (2). Replacing the merkle commitment with a
+real on-chain consumption ledger (`mapping(bytes32 => bool) consumed`, checked
+directly by `redeemIOU`) addresses both and removes the ring, the coverage
+rule and the whole non-inclusion surface — at the cost of one `SSTORE` per
+consumed id.
 
 ### Honest limitations
 
