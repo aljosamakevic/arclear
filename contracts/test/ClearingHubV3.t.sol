@@ -9,16 +9,19 @@ import {ManifestMerkle} from "../src/lib/ManifestMerkle.sol";
 
 /// @title  ClearingHubV3 — full port of the V2 suite plus the V3-only surface
 /// @notice Every assertion ClearingHubV2.t.sol made is reproduced here against
-///         V3, so the CR-01/CR-02 fixes cannot have regressed anything V2
-///         proved. The attack proofs themselves live in ClearingHubV3PoC.t.sol.
+///         V3, EXCEPT those that pinned the root ring, the `expiry - L` coverage
+///         precondition and the non-inclusion proof regime — that whole
+///         mechanism was deleted, not weakened, and is replaced by the
+///         `consumed` ledger assertions below. The attack proofs live in
+///         ClearingHubV3PoC.t.sol.
 contract ClearingHubV3Test is RoundBuilderV3 {
     function setUp() public {
         _setUpActors();
     }
 
-    /// Fund the debtor (actors[0]), sign an L-convention IOU to actors[1],
-    /// then stale the debtor on the ON-CHAIN clock: K executed rounds without
-    /// them (Pitfall 4 — never coordinator counters).
+    /// Fund the debtor (actors[0]), sign an IOU to actors[1], then stale the
+    /// debtor on the ON-CHAIN clock: K executed rounds in which they settle
+    /// nothing (Pitfall 4 — never coordinator counters).
     function _staleSetup()
         internal
         returns (ClearingHubV3.Iou memory iou, bytes memory sig, bytes32 id)
@@ -47,9 +50,9 @@ contract ClearingHubV3Test is RoundBuilderV3 {
     }
 
     /// Ordering the party pair is what removes the role-swap footgun: a
-    /// coordinator that lists (creditor, debtor) commits the SAME leaf the
-    /// creditor will later prove non-inclusion against, so a genuinely-netted
-    /// IOU can never stay redeemable through an argument-order slip.
+    /// coordinator that lists (creditor, debtor) writes the SAME ledger key the
+    /// creditor's redemption later reads, so a genuinely-netted IOU can never
+    /// stay redeemable through an argument-order slip.
     function test_manifestLeafId_isPairOrderInsensitive() public view {
         bytes32 id = keccak256("some-iou");
         assertEq(
@@ -59,49 +62,81 @@ contract ClearingHubV3Test is RoundBuilderV3 {
         );
     }
 
-    /// Different party pairs over the SAME id commit different leaves. This is
-    /// the whole of the CR-01 fix in one assertion.
+    /// Different party pairs over the SAME id derive different keys. This is
+    /// the whole of the CR-01 fix, and the reason the CR-02 ledger can be keyed
+    /// on the leaf without re-opening CR-01.
     function test_manifestLeafId_differsAcrossPartyPairs() public view {
         bytes32 id = keccak256("some-iou");
         assertTrue(
             hub.manifestLeafId(id, actors[0], actors[1])
                 != hub.manifestLeafId(id, actors[3], actors[4]),
-            "an unrelated pair must not be able to commit the honest leaf"
+            "an unrelated pair must not be able to write the honest ledger key"
         );
     }
 
     // ------------------------------------------------- executeRound evolution
 
-    function test_executeRound_writesRootRing() public {
+    /// The manifest commitment is KEPT: the root still travels into the signed
+    /// digest, so signatures bind the exact leaf set even though redemption no
+    /// longer proves anything against it.
+    function test_executeRound_manifestRootStillBindsTheDigest() public {
+        _fundAndDeposit(actors[0], 10e6);
+        (address[] memory p, int256[] memory d, ClearingHubV3.ConsumedRef[] memory refs) =
+            _simpleRound();
+        bytes32 root = ManifestMerkle.rootOf(_leaves(p, refs));
+
+        vm.expectEmit(true, true, true, true);
+        emit ClearingHubV3.RoundExecuted(0, hub.hashRound(0, p, d, root), root, 3, 3e6);
+        _execute(p, d, refs);
+    }
+
+    /// Every consumed leaf lands in the permanent ledger.
+    function test_executeRound_writesConsumedLedger() public {
         _fundAndDeposit(actors[0], 10e6);
         (address[] memory p, int256[] memory d, ClearingHubV3.ConsumedRef[] memory refs) =
             _simpleRound();
         _execute(p, d, refs);
 
-        (bytes32 root, uint64 nonce_, uint64 executedAt) = hub.rootRing(0);
-        assertEq(root, ManifestMerkle.rootOf(_leaves(p, refs)), "ring root != derived root");
-        assertEq(nonce_, 0, "ring nonce");
-        assertEq(executedAt, uint64(block.timestamp), "ring executedAt");
+        bytes32[] memory leaves = _leaves(p, refs);
+        for (uint256 i; i < leaves.length; ++i) {
+            assertTrue(hub.consumed(leaves[i]), "leaf missing from consumption ledger");
+        }
+        assertFalse(hub.consumed(keccak256("never-netted")), "unrelated key must stay clear");
     }
 
-    function test_executeRound_writesLastRoundForAllParticipants() public {
+    /// WR-11: `lastRound` refreshes for participants who settled something —
+    /// a non-zero delta OR a ref naming them — and NOT for a pure co-signer.
+    /// V2 refreshed everyone, which is what made a keep-alive round free.
+    function test_executeRound_lastRoundOnlyForSettlingParticipants() public {
         _fundAndDeposit(actors[0], 10e6);
         address[] memory p = new address[](3);
         int256[] memory d = new int256[](3);
         (p[0], p[1], p[2]) = (actors[0], actors[1], actors[2]);
+        // actors[1] gets a zero delta AND no attributed ref: a pure co-signer.
         (d[0], d[1], d[2]) = (int256(-1e6), int256(0), int256(1e6));
-        _execute(p, d, _manifest(p, 2, "lastround"));
+        _execute(p, d, _manifest(p, 2, "wr11", 0, 2));
 
-        // 1-based marker nonce+1 for EVERY participant, zero-delta included:
-        // their netted paper was consumed, participation is consent.
-        assertEq(hub.lastRound(actors[0]), 1, "debtor lastRound");
-        assertEq(hub.lastRound(actors[1]), 1, "zero-delta consenter lastRound");
-        assertEq(hub.lastRound(actors[2]), 1, "creditor lastRound");
+        assertEq(hub.lastRound(actors[0]), 1, "attributed + non-zero delta");
+        assertEq(hub.lastRound(actors[2]), 1, "attributed + non-zero delta");
+        assertEq(hub.lastRound(actors[1]), 0, "pure co-signer must NOT refresh (WR-11)");
         assertEq(hub.lastRound(actors[3]), 0, "non-participant untouched");
     }
 
-    /// The sorted-manifest guard now orders DERIVED LEAVES, not raw ids — the
-    /// SDK's sort key changes with it.
+    /// The delta disjunct is load-bearing: a round may legitimately move value
+    /// with an empty manifest, and those participants must not be recorded idle.
+    function test_executeRound_lastRoundRefreshesOnDeltaAlone() public {
+        _fundAndDeposit(actors[0], 10e6);
+        address[] memory p = new address[](2);
+        (p[0], p[1]) = (actors[0], actors[1]);
+        int256[] memory d = new int256[](2);
+        (d[0], d[1]) = (int256(-1e6), int256(1e6));
+        _execute(p, d, _noRefs());
+        assertEq(hub.lastRound(actors[0]), 1, "value-moving participant must refresh");
+        assertEq(hub.lastRound(actors[1]), 1, "value-moving participant must refresh");
+    }
+
+    /// The sorted-manifest guard orders DERIVED LEAVES, not raw ids — the SDK's
+    /// sort key changes with it.
     function test_revert_executeRound_unsortedConsumedRefs() public {
         address[] memory p = new address[](2);
         (p[0], p[1]) = (actors[0], actors[1]);
@@ -117,7 +152,7 @@ contract ClearingHubV3Test is RoundBuilderV3 {
     /// later round's manifest reverts executeRound before signature checks.
     function test_revert_executeRound_nullifiedId() public {
         (ClearingHubV3.Iou memory iou, bytes memory sig, bytes32 id) = _staleSetup();
-        hub.redeemIOU(iou, sig, _proofsForIou(iou));
+        hub.redeemIOU(iou, sig);
 
         address[] memory p = new address[](2);
         (p[0], p[1]) = (actors[0], actors[1]);
@@ -129,10 +164,28 @@ contract ClearingHubV3Test is RoundBuilderV3 {
         hub.executeRound(nonce_, p, d, refs, new bytes[](2));
     }
 
+    /// IN-05: "one IOU, one settlement" is now an on-chain invariant rather
+    /// than a coordinator convention. Under V2 the same id could appear in
+    /// unlimited round manifests.
+    function test_revert_executeRound_alreadyConsumedAcrossRounds() public {
+        address[] memory p = new address[](2);
+        (p[0], p[1]) = (actors[0], actors[1]);
+        ClearingHubV3.ConsumedRef[] memory refs = _manifest(p, 1, "double-net");
+        bytes32 leaf = _leaves(p, refs)[0];
+
+        _execute(p, new int256[](2), refs);
+        assertTrue(hub.consumed(leaf), "first round must have consumed it");
+
+        uint64 nonce_ = hub.roundNonce();
+        bytes[] memory sigs = _buildSignatures(nonce_, p, new int256[](2), refs);
+        vm.expectRevert(abi.encodeWithSelector(ClearingHubV3.AlreadyConsumed.selector, leaf));
+        hub.executeRound(nonce_, p, new int256[](2), refs, sigs);
+    }
+
     // ---------------------------------------------------- V3-only round gates
 
     /// CR-01 input validation: a ref may only name participants of THIS round.
-    /// Both indices are checked, and both are checked before any signature work.
+    /// Both indices are checked, and both before any signature work.
     function test_revert_executeRound_partyIndexOutOfRange() public {
         address[] memory p = new address[](2);
         (p[0], p[1]) = (actors[0], actors[1]);
@@ -155,8 +208,8 @@ contract ClearingHubV3Test is RoundBuilderV3 {
         assertEq(hub.roundNonce(), 0, "nonce must not advance");
     }
 
-    /// No IOU has one party. Allowing it would let a single address commit a
-    /// leaf unilaterally, which is the CR-01 primitive in miniature.
+    /// No IOU has one party. Allowing it would let a single address write a
+    /// ledger key unilaterally, which is the CR-01 primitive in miniature.
     function test_revert_executeRound_selfConsumedRef() public {
         address[] memory p = new address[](2);
         (p[0], p[1]) = (actors[0], actors[1]);
@@ -167,9 +220,9 @@ contract ClearingHubV3Test is RoundBuilderV3 {
         hub.executeRound(0, p, d, refs, new bytes[](2));
     }
 
-    /// CR-02: a round that neither moves value nor consumes paper does nothing
-    /// but advance the nonce and overwrite a ring slot — rejected, before any
-    /// keccak or ecrecover work.
+    /// A round that neither moves value nor consumes paper does nothing but
+    /// advance `roundNonce`, which drags every non-participant closer to being
+    /// redeemable-against. Rejected, before any keccak or ecrecover work.
     function test_revert_executeRound_emptyRound() public {
         address[] memory p = new address[](2);
         (p[0], p[1]) = (actors[0], actors[1]);
@@ -193,7 +246,7 @@ contract ClearingHubV3Test is RoundBuilderV3 {
     }
 
     /// A round with real deltas and an empty manifest stays legal too — it
-    /// moves value, so it is not the free-round primitive.
+    /// moves value, so it is not the do-nothing shape.
     function test_executeRound_emptyManifestWithRealDeltasIsLegal() public {
         _fundAndDeposit(actors[0], 10e6);
         address[] memory p = new address[](2);
@@ -329,6 +382,9 @@ contract ClearingHubV3Test is RoundBuilderV3 {
             )
         );
         hub.executeRound(0, p, d, refs, sigs);
+        // The ledger write happens before the collateral loop, so this also
+        // pins that a reverted round leaves NO ledger residue.
+        assertFalse(hub.consumed(_leaves(p, refs)[0]), "reverted round must not consume");
     }
 
     // ------------------------------------------- deposit/withdraw/constructor
@@ -355,20 +411,12 @@ contract ClearingHubV3Test is RoundBuilderV3 {
         assertEq(usdc.balanceOf(actors[0]), 0, "no tokens left the hub");
     }
 
-    /// K/RING/MAX_IOU_LIFETIME are immutable, so a bad deploy is unfixable:
-    /// RING == 0 makes `rootRing[nonce_ % RING]` a division-by-zero panic on
-    /// the very first round (bricking the hub), K == 0 makes every debtor
-    /// instantly redeemable-against, and L == 0 makes the coverage window
-    /// unsatisfiable. Each argument is asserted independently.
+    /// K is immutable, so a bad deploy is unfixable: K == 0 makes every debtor
+    /// instantly redeemable-against. RING and MAX_IOU_LIFETIME no longer exist,
+    /// so the V2 BadConfig matrix collapses to this one argument.
     function test_revert_constructor_badConfig() public {
         vm.expectRevert(ClearingHubV3.BadConfig.selector);
-        new ClearingHubV3(usdc, 0, RING, L);
-
-        vm.expectRevert(ClearingHubV3.BadConfig.selector);
-        new ClearingHubV3(usdc, K, 0, L);
-
-        vm.expectRevert(ClearingHubV3.BadConfig.selector);
-        new ClearingHubV3(usdc, K, RING, 0);
+        new ClearingHubV3(usdc, 0);
     }
 
     // ---------------------------------------------------------- WR-06: owner
@@ -389,7 +437,9 @@ contract ClearingHubV3Test is RoundBuilderV3 {
         vm.prank(actors[0]);
         hub.acceptOwnership();
         assertEq(hub.owner(), actors[0], "two-step transfer must still work");
-        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(this)));
+        vm.expectRevert(
+            abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(this))
+        );
         hub.pause();
     }
 
@@ -401,7 +451,7 @@ contract ClearingHubV3Test is RoundBuilderV3 {
 
         vm.expectEmit(true, true, true, true);
         emit ClearingHubV3.IouRedeemed(id, actors[0], actors[1], 5e6, 3);
-        hub.redeemIOU(iou, sig, _proofsForIou(iou));
+        hub.redeemIOU(iou, sig);
 
         assertEq(hub.collateral(actors[0]), 5e6, "debtor debited exactly amount");
         assertEq(hub.collateral(actors[1]), 5e6, "creditor credited exactly amount");
@@ -410,23 +460,52 @@ contract ClearingHubV3Test is RoundBuilderV3 {
         assertTrue(hub.redeemed(id), "nullifier set");
     }
 
+    /// Redemption no longer depends on ANY bounded history. Under V2 this exact
+    /// shape (far more than RING rounds executed since the IOU was signed) hit
+    /// the `expiry - L` coverage precondition; V3 has no such precondition, so
+    /// an old IOU against a stale debtor is still recoverable.
+    function test_redeemIOU_afterManyRounds_noCoverageWindow() public {
+        _fundAndDeposit(actors[0], 10e6);
+        ClearingHubV3.Iou memory iou = _makeIou(actors[0], actors[1], 5e6, 1);
+        bytes memory sig = _signIou(keys[0], iou);
+        for (uint256 i; i < 40; ++i) {
+            _executeRoundWithout(actors[0]);
+        }
+        vm.warp(block.timestamp + 30 days); // long past expiry: recovery is not netting
+        hub.redeemIOU(iou, sig);
+        assertEq(hub.collateral(actors[1]), 5e6, "history depth must not gate redemption");
+    }
+
+    /// A short-lived IOU is no harder to redeem than a maximum-dated one
+    /// (WR-03 died with the coverage rule, which keyed off `expiry - L`).
+    function test_redeemIOU_shortExpiryIsNotPenalised() public {
+        _fundAndDeposit(actors[0], 10e6);
+        ClearingHubV3.Iou memory iou =
+            _makeIou(actors[0], actors[1], 5e6, 1, uint64(block.timestamp) + 300);
+        bytes memory sig = _signIou(keys[0], iou);
+        for (uint256 i; i < 20; ++i) {
+            _executeRoundWithout(actors[0]);
+        }
+        hub.redeemIOU(iou, sig);
+        assertEq(hub.collateral(actors[1]), 5e6, "short-dated paper must redeem too");
+    }
+
     // --------------------------------------------------------- revert matrix
 
     function test_revert_redeemIOU_notStale() public {
         _fundAndDeposit(actors[0], 10e6);
         ClearingHubV3.Iou memory iou = _makeIou(actors[0], actors[1], 5e6, 1);
         bytes memory sig = _signIou(keys[0], iou);
-        // Debtor participates in round 0, then misses only 2 of the 3 required.
-        _executeRoundWithout(address(0)); // all five actors
+        // Debtor settles in round 0, then misses only 2 of the 3 required.
+        _executeRoundWithout(address(0)); // all five actors; refs name actors[0]
         _executeRoundWithout(actors[0]);
         _executeRoundWithout(actors[0]);
         // roundNonce=3, lastRound[debtor]=1: 3 - 1 == 2 < K
-        ManifestMerkle.NonInclusionProof[] memory proofs = _proofsForIou(iou);
         vm.expectRevert(abi.encodeWithSelector(ClearingHubV3.DebtorNotStale.selector, 1, 3));
-        hub.redeemIOU(iou, sig, proofs);
+        hub.redeemIOU(iou, sig);
     }
 
-    /// Never-participated debtor (lastRound == 0): stale iff roundNonce >= K.
+    /// Never-settled debtor (lastRound == 0): stale iff roundNonce >= K.
     /// Both sides of the boundary (Pitfall 6).
     function test_revert_redeemIOU_neverParticipatedBoundary() public {
         _fundAndDeposit(actors[0], 10e6);
@@ -436,66 +515,13 @@ contract ClearingHubV3Test is RoundBuilderV3 {
         _executeRoundWithout(actors[0]);
         _executeRoundWithout(actors[0]);
         // roundNonce == K-1 == 2: not yet stale
-        ManifestMerkle.NonInclusionProof[] memory proofs = _proofsForIou(iou);
         vm.expectRevert(abi.encodeWithSelector(ClearingHubV3.DebtorNotStale.selector, 0, 3));
-        hub.redeemIOU(iou, sig, proofs);
+        hub.redeemIOU(iou, sig);
 
         _executeRoundWithout(actors[0]);
-        // roundNonce == K == 3: ignored every round that ever existed — stale
-        hub.redeemIOU(iou, sig, _proofsForIou(iou));
+        // roundNonce == K == 3: settled nothing in every round that ever existed
+        hub.redeemIOU(iou, sig);
         assertEq(hub.collateral(actors[0]), 5e6);
-        assertEq(hub.collateral(actors[1]), 5e6);
-    }
-
-    /// Eviction occurred (roundNonce > RING) and the oldest buffered root does
-    /// NOT predate expiry - L: a consuming round may be unverifiable — revert.
-    function test_revert_redeemIOU_coverageNotBuffered() public {
-        _fundAndDeposit(actors[0], 10e6);
-        // Signed at t=1 with the L-convention max: expiry = 1 + L.
-        ClearingHubV3.Iou memory iou = _makeIou(actors[0], actors[1], 5e6, 1);
-        bytes memory sig = _signIou(keys[0], iou);
-        for (uint256 i; i < 17; ++i) {
-            _executeRoundWithout(actors[0]); // RING+1 rounds: round 0 evicted
-        }
-        // oldest buffered round (nonce 1) executedAt=1 >= windowStart=1
-        ManifestMerkle.NonInclusionProof[] memory proofs = _proofsForIou(iou);
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                ClearingHubV3.CoverageWindowNotBuffered.selector, uint64(1), uint64(1)
-            )
-        );
-        hub.redeemIOU(iou, sig, proofs);
-    }
-
-    /// expiry <= L with evicted history: the would-be underflow branch is
-    /// fail-closed and reports windowStart 0 (the honest floor).
-    function test_revert_redeemIOU_coverageExpiryUnderflow() public {
-        _fundAndDeposit(actors[0], 10e6);
-        ClearingHubV3.Iou memory iou = _makeIou(actors[0], actors[1], 5e6, 1, 100); // expiry <= L
-        bytes memory sig = _signIou(keys[0], iou);
-        for (uint256 i; i < 17; ++i) {
-            _executeRoundWithout(actors[0]);
-        }
-        ManifestMerkle.NonInclusionProof[] memory proofs = _proofsForIou(iou);
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                ClearingHubV3.CoverageWindowNotBuffered.selector, uint64(1), uint64(0)
-            )
-        );
-        hub.redeemIOU(iou, sig, proofs);
-    }
-
-    /// Positive coverage after eviction: the oldest buffered root predates
-    /// expiry - L, so every possible consuming round is still buffered.
-    function test_redeemIOU_afterEviction_coverageWindowClear() public {
-        _fundAndDeposit(actors[0], 10e6);
-        for (uint256 i; i < 17; ++i) {
-            _executeRoundWithout(actors[0]); // all executed at t=1
-        }
-        vm.warp(200000);
-        ClearingHubV3.Iou memory iou = _makeIou(actors[0], actors[1], 5e6, 1); // expiry = 200000 + L
-        bytes memory sig = _signIou(keys[0], iou);
-        hub.redeemIOU(iou, sig, _proofsForIou(iou));
         assertEq(hub.collateral(actors[1]), 5e6);
     }
 
@@ -506,60 +532,43 @@ contract ClearingHubV3Test is RoundBuilderV3 {
         for (uint256 i; i < K; ++i) {
             _executeRoundWithout(actors[0]);
         }
-        ManifestMerkle.NonInclusionProof[] memory proofs = _proofsForIou(iou);
         vm.expectRevert(ClearingHubV3.BadIouSignature.selector);
-        hub.redeemIOU(iou, sig, proofs);
+        hub.redeemIOU(iou, sig);
     }
 
     function test_revert_redeemIOU_alreadyRedeemed() public {
         (ClearingHubV3.Iou memory iou, bytes memory sig, bytes32 id) = _staleSetup();
-        hub.redeemIOU(iou, sig, _proofsForIou(iou));
-        ManifestMerkle.NonInclusionProof[] memory proofs = _proofsForIou(iou);
+        hub.redeemIOU(iou, sig);
         vm.expectRevert(abi.encodeWithSelector(ClearingHubV3.AlreadyRedeemed.selector, id));
-        hub.redeemIOU(iou, sig, proofs);
+        hub.redeemIOU(iou, sig);
     }
 
-    function test_revert_redeemIOU_proofCountMismatch() public {
-        (ClearingHubV3.Iou memory iou, bytes memory sig,) = _staleSetup();
-        ManifestMerkle.NonInclusionProof[] memory full = _proofsForIou(iou);
-        assertEq(full.length, 3, "test-internal: expected 3 buffered rounds");
-        ManifestMerkle.NonInclusionProof[] memory short_ =
-            new ManifestMerkle.NonInclusionProof[](2);
-        (short_[0], short_[1]) = (full[0], full[1]); // drop one proof
-        vm.expectRevert(abi.encodeWithSelector(ClearingHubV3.ProofCountMismatch.selector, 3, 2));
-        hub.redeemIOU(iou, sig, short_);
-    }
-
-    /// Exclusivity, structural net->cannot-redeem direction (MERK-04/D-15): an
-    /// IOU consumed in a buffered round can never yield a valid non-inclusion
-    /// proof for that round — strict inequalities make it impossible.
-    ///
-    /// Under V3 the consuming round must contain BOTH parties (they both sign),
-    /// so this models the only way an IOU can legitimately be netted.
-    function test_revert_redeemIOU_nonInclusionInvalid() public {
+    /// Exclusivity, net->cannot-redeem direction (D-14/D-15), now a single
+    /// permanent ledger read instead of a proof set over a bounded ring. Under
+    /// V3 the consuming round must contain BOTH parties (they both sign), so
+    /// this models the only way an IOU can be netted at all.
+    function test_revert_redeemIOU_alreadyNetted() public {
         _fundAndDeposit(actors[0], 10e6);
         ClearingHubV3.Iou memory iou = _makeIou(actors[0], actors[1], 5e6, 1);
         bytes memory sig = _signIou(keys[0], iou);
         bytes32 id = hub.hashIou(iou);
 
-        // Round 0: all five actors consent, and the manifest genuinely consumes
-        // the IOU (plus two neighbors so the bracketing proof is a real one).
-        address[] memory p = _presentActors(address(0));
-        ClearingHubV3.ConsumedRef[] memory refs = _manifest(p, 3, "neighbors");
+        address[] memory p = new address[](2);
+        (p[0], p[1]) = (actors[0], actors[1]);
+        ClearingHubV3.ConsumedRef[] memory refs = new ClearingHubV3.ConsumedRef[](1);
         refs[0] = _refFor(p, id, iou.debtor, iou.creditor);
-        _sortRefs(p, refs);
-        _execute(p, new int256[](p.length), refs);
+        _execute(p, new int256[](2), refs); // an all-cancel round, both consenting
 
-        // Rounds 1..3 without the debtor — now stale (4 - 1 == 3 == K).
+        assertTrue(hub.isConsumed(iou), "isConsumed view must agree with the ledger");
+
         for (uint256 i; i < K; ++i) {
             _executeRoundWithout(actors[0]);
         }
 
-        ManifestMerkle.NonInclusionProof[] memory proofs = _proofsForIou(iou);
         vm.expectRevert(
-            abi.encodeWithSelector(ClearingHubV3.NonInclusionProofInvalid.selector, uint64(0))
+            abi.encodeWithSelector(ClearingHubV3.IouAlreadyNetted.selector, _leafOf(iou))
         );
-        hub.redeemIOU(iou, sig, proofs);
+        hub.redeemIOU(iou, sig);
     }
 
     /// Withdraw-race honesty (Pitfall 2): redemption recovers posted,
@@ -568,25 +577,24 @@ contract ClearingHubV3Test is RoundBuilderV3 {
         (ClearingHubV3.Iou memory iou, bytes memory sig,) = _staleSetup();
         vm.prank(actors[0]);
         hub.withdraw(10e6); // never-pausable exit front-runs redemption
-        ManifestMerkle.NonInclusionProof[] memory proofs = _proofsForIou(iou);
         vm.expectRevert(
             abi.encodeWithSelector(
                 ClearingHubV3.InsufficientCollateral.selector, actors[0], 0, 5e6
             )
         );
-        hub.redeemIOU(iou, sig, proofs);
+        hub.redeemIOU(iou, sig);
     }
 
     function test_revert_redeemIOU_zeroAmount() public {
         ClearingHubV3.Iou memory iou = _makeIou(actors[0], actors[1], 0, 1);
         vm.expectRevert(ClearingHubV3.ZeroAmount.selector);
-        hub.redeemIOU(iou, "", new ManifestMerkle.NonInclusionProof[](0));
+        hub.redeemIOU(iou, "");
     }
 
     function test_revert_redeemIOU_selfIou() public {
         ClearingHubV3.Iou memory iou = _makeIou(actors[0], actors[0], 5e6, 1);
         vm.expectRevert(ClearingHubV3.SelfIou.selector);
-        hub.redeemIOU(iou, "", new ManifestMerkle.NonInclusionProof[](0));
+        hub.redeemIOU(iou, "");
     }
 
     /// IN-04: crediting the zero address would permanently burn the debtor's
@@ -594,36 +602,20 @@ contract ClearingHubV3Test is RoundBuilderV3 {
     function test_revert_redeemIOU_zeroAddressParty() public {
         ClearingHubV3.Iou memory a = _makeIou(actors[0], address(0), 5e6, 1);
         vm.expectRevert(ClearingHubV3.ZeroAddressParty.selector);
-        hub.redeemIOU(a, "", new ManifestMerkle.NonInclusionProof[](0));
+        hub.redeemIOU(a, "");
 
         ClearingHubV3.Iou memory b = _makeIou(address(0), actors[1], 5e6, 1);
         vm.expectRevert(ClearingHubV3.ZeroAddressParty.selector);
-        hub.redeemIOU(b, "", new ManifestMerkle.NonInclusionProof[](0));
-    }
-
-    /// WR-01: ManifestMerkle's width recurrence `w = (w + 1) >> 1` panics
-    /// (checked-arithmetic 0x11) on a leafCount near 2^256, which under V2
-    /// surfaced as an opaque Panic instead of a proof error. V3 bounds it first.
-    function test_revert_redeemIOU_implausibleLeafCount() public {
-        (ClearingHubV3.Iou memory iou, bytes memory sig,) = _staleSetup();
-        ManifestMerkle.NonInclusionProof[] memory proofs = _proofsForIou(iou);
-        proofs[0].a.leafCount = type(uint256).max;
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                ClearingHubV3.ImplausibleLeafCount.selector, type(uint256).max
-            )
-        );
-        hub.redeemIOU(iou, sig, proofs);
+        hub.redeemIOU(b, "");
     }
 
     // -------------------------------------------------------- pause boundary
 
     function test_redeemIOU_revertsWhilePaused() public {
         (ClearingHubV3.Iou memory iou, bytes memory sig,) = _staleSetup();
-        ManifestMerkle.NonInclusionProof[] memory proofs = _proofsForIou(iou);
         hub.pause();
         vm.expectRevert();
-        hub.redeemIOU(iou, sig, proofs);
+        hub.redeemIOU(iou, sig);
     }
 
     function test_executeRound_revertsWhilePaused_V3() public {
@@ -646,116 +638,9 @@ contract ClearingHubV3Test is RoundBuilderV3 {
 
     // ------------------------------------------------------------------ fuzz
 
-    /// Stale setup where every buffered round carries a distinct 3-entry
-    /// manifest, so no proof is a sentinel short-circuit and positional
-    /// mismatches are always detectable.
-    function _staleSetupWithManifests()
-        internal
-        returns (ClearingHubV3.Iou memory iou, bytes memory sig, bytes32 id)
-    {
-        _fundAndDeposit(actors[0], 10e6);
-        iou = _makeIou(actors[0], actors[1], 5e6, 1);
-        sig = _signIou(keys[0], iou);
-        id = hub.hashIou(iou);
-        for (uint256 r; r < K; ++r) {
-            _executeRoundWithout(actors[0], 3);
-        }
-    }
-
-    /// T-02-21: a fuzz-chosen proof removed (count mismatch) or two proofs
-    /// swapped (positional mismatch) always reverts, state untouched.
-    function testFuzz_redeemProofSetSkip_reverts(uint256 seed) public {
-        (ClearingHubV3.Iou memory iou, bytes memory sig,) = _staleSetupWithManifests();
-        ManifestMerkle.NonInclusionProof[] memory full = _proofsForIou(iou);
-        uint256 debtorBefore = hub.collateral(actors[0]);
-        uint256 creditorBefore = hub.collateral(actors[1]);
-
-        if (seed % 2 == 0) {
-            uint256 drop = (seed >> 8) % 3;
-            ManifestMerkle.NonInclusionProof[] memory bad =
-                new ManifestMerkle.NonInclusionProof[](2);
-            uint256 j;
-            for (uint256 i; i < 3; ++i) {
-                if (i != drop) bad[j++] = full[i];
-            }
-            vm.expectRevert(
-                abi.encodeWithSelector(ClearingHubV3.ProofCountMismatch.selector, 3, 2)
-            );
-            hub.redeemIOU(iou, sig, bad);
-        } else {
-            uint256 i_ = seed % 3;
-            uint256 j_ = (i_ + 1 + ((seed >> 8) % 2)) % 3;
-            (full[i_], full[j_]) = (full[j_], full[i_]);
-            vm.expectRevert(); // NonInclusionProofInvalid at first mismatched nonce
-            hub.redeemIOU(iou, sig, full);
-        }
-
-        assertEq(hub.roundNonce(), 3, "state must be untouched");
-        assertEq(hub.collateral(actors[0]), debtorBefore, "debtor balance moved");
-        assertEq(hub.collateral(actors[1]), creditorBefore, "creditor balance moved");
-    }
-
-    /// T-02-22: after one successful redemption, fuzz-perturbed re-attempts
-    /// always revert AlreadyRedeemed (nullifier precedes proof checks) and
-    /// balances never move again.
-    function testFuzz_redeemNullifierIdempotent(uint256 seed) public {
-        (ClearingHubV3.Iou memory iou, bytes memory sig, bytes32 id) = _staleSetupWithManifests();
-        hub.redeemIOU(iou, sig, _proofsForIou(iou));
-        uint256 debtorAfter = hub.collateral(actors[0]);
-        uint256 creditorAfter = hub.collateral(actors[1]);
-
-        ManifestMerkle.NonInclusionProof[] memory proofs = _proofsForIou(iou);
-        uint256 mode = seed % 3;
-        if (mode == 1) {
-            proofs = new ManifestMerkle.NonInclusionProof[]((seed >> 8) % 3); // wrong count
-        } else if (mode == 2) {
-            proofs[(seed >> 8) % 3].a.leaf = bytes32(seed); // garbage contents
-        } // mode 0: byte-identical replay
-
-        vm.expectRevert(abi.encodeWithSelector(ClearingHubV3.AlreadyRedeemed.selector, id));
-        hub.redeemIOU(iou, sig, proofs);
-
-        assertEq(hub.collateral(actors[0]), debtorAfter, "debtor balance moved again");
-        assertEq(hub.collateral(actors[1]), creditorAfter, "creditor balance moved again");
-        assertTrue(hub.redeemed(id), "nullifier must stay set");
-    }
-
-    /// T-02-21: perturbing index / leafCount / one sibling of a fuzz-chosen
-    /// proof in an otherwise-valid set always reverts at that proof's nonce.
-    function testFuzz_redeemProofPerturbation_reverts(uint256 seed) public {
-        (ClearingHubV3.Iou memory iou, bytes memory sig,) = _staleSetupWithManifests();
-        ManifestMerkle.NonInclusionProof[] memory proofs = _proofsForIou(iou);
-        uint256 debtorBefore = hub.collateral(actors[0]);
-        uint256 creditorBefore = hub.collateral(actors[1]);
-
-        uint256 k = seed % 3;
-        uint256 mode = (seed >> 8) % 3;
-        if (mode == 0) {
-            proofs[k].a.index += 1; // breaks kind-position binding / adjacency
-        } else if (mode == 1) {
-            // 3 -> 8 leaves: the full-tree schedule demands 3 siblings, the
-            // proof carries at most 2 — schedule mismatch, never verifies
-            proofs[k].a.leafCount += 5;
-        } else {
-            uint256 sc = proofs[k].a.siblings.length;
-            uint256 si = (seed >> 16) % sc;
-            proofs[k].a.siblings[si] =
-                proofs[k].a.siblings[si] ^ bytes32(uint256(1) << ((seed >> 24) % 256));
-        }
-
-        vm.expectRevert(
-            abi.encodeWithSelector(ClearingHubV3.NonInclusionProofInvalid.selector, uint64(k))
-        );
-        hub.redeemIOU(iou, sig, proofs);
-
-        assertEq(hub.roundNonce(), 3, "state must be untouched");
-        assertEq(hub.collateral(actors[0]), debtorBefore, "debtor balance moved");
-        assertEq(hub.collateral(actors[1]), creditorBefore, "creditor balance moved");
-    }
-
     /// Zero-sum is enforced for every fuzz-chosen perturbation of a valid,
-    /// fully-signed round: mutating one delta changes the digest, so the round
-    /// dies at BadSignature; re-signing the mutation dies at the sum check.
+    /// fully-signed round: re-signing the mutation still dies at the sum check,
+    /// and no ledger entry survives the revert.
     function testFuzz_perturbedDeltaAlwaysReverts(int256 delta, uint256 which) public {
         _fundAndDeposit(actors[0], 10e6);
         address[] memory p = new address[](3);
@@ -777,6 +662,7 @@ contract ClearingHubV3Test is RoundBuilderV3 {
             );
             hub.executeRound(0, p, d, refs, sigs);
             assertEq(hub.roundNonce(), 0, "nonce must not advance");
+            assertFalse(hub.consumed(_leaves(p, refs)[0]), "reverted round must not consume");
         }
         assertEq(
             hub.collateral(actors[0]) + hub.collateral(actors[1]) + hub.collateral(actors[2]),
@@ -785,12 +671,89 @@ contract ClearingHubV3Test is RoundBuilderV3 {
         );
     }
 
+    /// CR-01 as a property: NO pairing an attacker can write ever blocks the
+    /// honest redemption, for any fuzz-chosen attacker pair drawn from the
+    /// actors who are not party to the IOU.
+    function testFuzz_poisonedPairNeverBlocksRedemption(uint256 seed) public {
+        (ClearingHubV3.Iou memory iou, bytes memory sig, bytes32 id) = _staleSetup();
+
+        // Two distinct attackers from {actors[2], actors[3], actors[4]}.
+        uint256 ai = seed % 3;
+        uint256 bi = (seed >> 8) % 3;
+        if (ai == bi) bi = (bi + 1) % 3;
+        address x = actors[2 + ai];
+        address y = actors[2 + bi];
+        address[] memory p = new address[](2);
+        (p[0], p[1]) = x < y ? (x, y) : (y, x);
+
+        ClearingHubV3.ConsumedRef[] memory refs = new ClearingHubV3.ConsumedRef[](1);
+        refs[0] = ClearingHubV3.ConsumedRef({id: id, partyAIdx: 0, partyBIdx: 1});
+        _execute(p, new int256[](2), refs);
+
+        assertFalse(hub.isConsumed(iou), "the honest ledger key must stay clear");
+        hub.redeemIOU(iou, sig);
+        assertEq(hub.collateral(actors[1]), 5e6, "poisoning must never block redemption");
+    }
+
+    /// Exclusivity as a property: for any fuzz-chosen IOU, consuming it in a
+    /// round makes redemption impossible, and NOT consuming it leaves
+    /// redemption available. The two directions are mutually exclusive and
+    /// jointly exhaustive.
+    function testFuzz_consumedIffNotRedeemable(uint256 amount, uint256 nonce, bool consume)
+        public
+    {
+        amount = bound(amount, 1, 5e6);
+        _fundAndDeposit(actors[0], 10e6);
+        ClearingHubV3.Iou memory iou = _makeIou(actors[0], actors[1], amount, nonce);
+        bytes memory sig = _signIou(keys[0], iou);
+
+        if (consume) {
+            address[] memory p = new address[](2);
+            (p[0], p[1]) = (actors[0], actors[1]);
+            ClearingHubV3.ConsumedRef[] memory refs = new ClearingHubV3.ConsumedRef[](1);
+            refs[0] = _refFor(p, hub.hashIou(iou), iou.debtor, iou.creditor);
+            _execute(p, new int256[](2), refs);
+        }
+        for (uint256 i; i < K; ++i) {
+            _executeRoundWithout(actors[0]);
+        }
+
+        if (consume) {
+            vm.expectRevert(
+                abi.encodeWithSelector(ClearingHubV3.IouAlreadyNetted.selector, _leafOf(iou))
+            );
+            hub.redeemIOU(iou, sig);
+            assertEq(hub.collateral(actors[1]), 0, "netted paper must not also pay out");
+        } else {
+            hub.redeemIOU(iou, sig);
+            assertEq(hub.collateral(actors[1]), amount, "unnetted paper must be recoverable");
+        }
+    }
+
+    /// After one successful redemption, fuzz-perturbed re-attempts always
+    /// revert and balances never move again.
+    function testFuzz_redeemNullifierIdempotent(uint256 seed) public {
+        (ClearingHubV3.Iou memory iou, bytes memory sig, bytes32 id) = _staleSetup();
+        hub.redeemIOU(iou, sig);
+        uint256 debtorAfter = hub.collateral(actors[0]);
+        uint256 creditorAfter = hub.collateral(actors[1]);
+
+        for (uint256 r; r < seed % 4; ++r) {
+            _executeRoundWithout(actors[0]); // more history changes nothing
+        }
+        vm.expectRevert(abi.encodeWithSelector(ClearingHubV3.AlreadyRedeemed.selector, id));
+        hub.redeemIOU(iou, sig);
+
+        assertEq(hub.collateral(actors[0]), debtorAfter, "debtor balance moved again");
+        assertEq(hub.collateral(actors[1]), creditorAfter, "creditor balance moved again");
+        assertTrue(hub.redeemed(id), "nullifier must stay set");
+    }
+
     // ------------------------------------------------------------------- gas
     //
     // Historical m-series at a hard-coded n=5, kept for continuity with
     // ClearingHubV2.t.sol so the V2->V3 delta is directly comparable.
-    // GasScalingV3.t.sol is the file that measures across n AND includes
-    // intrinsic gas.
+    // GasScalingV3.t.sol measures across n AND includes intrinsic gas.
 
     function _gasExecuteRound(uint256 m) internal returns (uint256 used) {
         address[] memory p = new address[](5);
@@ -823,21 +786,37 @@ contract ClearingHubV3Test is RoundBuilderV3 {
         console2.log("V3 gas_executeRound n=5 m=250:", _gasExecuteRound(250));
     }
 
-    /// redeemIOU with the full RING=16 populated: 16 real (non-sentinel)
-    /// non-inclusion proofs over 8-entry manifests.
-    function test_gas_redeemIOU_ring16() public {
+    /// redeemIOU is now O(1): no proofs, no ring walk. The V2 counterpart with
+    /// RING=16 populated cost 199,604.
+    function test_gas_redeemIOU_ledger() public {
         _fundAndDeposit(actors[0], 10e6);
         ClearingHubV3.Iou memory iou = _makeIou(actors[0], actors[1], 5e6, 1);
         bytes memory sig = _signIou(keys[0], iou);
         for (uint256 r; r < 16; ++r) {
             _executeRoundWithout(actors[0], 8);
         }
-        ManifestMerkle.NonInclusionProof[] memory proofs = _proofsForIou(iou);
 
         uint256 g0 = gasleft();
-        hub.redeemIOU(iou, sig, proofs);
+        hub.redeemIOU(iou, sig);
         uint256 used = g0 - gasleft();
-        console2.log("V3 gas_redeemIOU RING=16 (8-entry manifests):", used);
+        console2.log("V3 gas_redeemIOU (ledger, O(1)):", used);
+        assertEq(hub.collateral(actors[1]), 5e6, "redemption must have settled");
+    }
+
+    /// ...and it stays O(1) as history grows, which is the property the ring
+    /// could not offer. Same measurement after 4x the round count.
+    function test_gas_redeemIOU_ledgerIsHistoryIndependent() public {
+        _fundAndDeposit(actors[0], 10e6);
+        ClearingHubV3.Iou memory iou = _makeIou(actors[0], actors[1], 5e6, 1);
+        bytes memory sig = _signIou(keys[0], iou);
+        for (uint256 r; r < 64; ++r) {
+            _executeRoundWithout(actors[0], 8);
+        }
+
+        uint256 g0 = gasleft();
+        hub.redeemIOU(iou, sig);
+        uint256 used = g0 - gasleft();
+        console2.log("V3 gas_redeemIOU after 64 rounds:", used);
         assertEq(hub.collateral(actors[1]), 5e6, "redemption must have settled");
     }
 }
