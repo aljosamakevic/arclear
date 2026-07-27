@@ -14,6 +14,7 @@ import { keccak256, toHex, type Address, type Hex } from "viem";
 import { iouId, signIou } from "../src/iou.js";
 import {
   inclusionProof,
+  manifestLeafId,
   merkleRoot,
   nonInclusionProof,
   verifyNonInclusion,
@@ -22,7 +23,7 @@ import {
 } from "../src/merkle.js";
 import { buildPvPProposal, signPvPConsent } from "../src/pvp.js";
 import { manifestHash, roundDigest, signConsent, buildProposal } from "../src/round.js";
-import type { Iou } from "../src/types.js";
+import type { ConsumedIou, Iou } from "../src/types.js";
 
 const HUB = "0x1111111111111111111111111111111111111111" as Address;
 
@@ -48,8 +49,14 @@ const iou: Iou = {
   ref: "0x" + "ab".repeat(32) as Hex,
 };
 const id = iouId(HUB, iou);
-const ids = [id].sort() as Hex[];
-const mh = manifestHash(ids);
+// v3: the manifest preimage is the PARTY-BOUND leaf, not the raw id. The
+// fixture carries the id and both parties alongside the derived leaf so the
+// Solidity side can re-derive the whole chain id -> leaf -> root -> digest
+// rather than being handed an opaque manifestHash.
+const consumed: ConsumedIou[] = [
+  { id, debtor: iou.debtor, creditor: iou.creditor, leafId: manifestLeafId(id, iou.debtor, iou.creditor) },
+];
+const mh = manifestHash(consumed);
 
 const round = { roundNonce: 0n, participants, deltas, manifestHash: mh };
 const digest = roundDigest(HUB, round);
@@ -57,7 +64,7 @@ const digest = roundDigest(HUB, round);
 const proposal = buildProposal(HUB, 0n, {
   participants,
   deltas,
-  consumedIds: ids,
+  consumed,
   settledVolume: 3_000_000n,
   grossVolume: 3_000_000n,
 });
@@ -85,11 +92,19 @@ const pvpUsdcLeg = proposal;
 // EURC leg: same participant trio, distinct IOU nonce (and hub domain) so its
 // digest necessarily differs from the USDC leg's.
 const eurcIou: Iou = { ...iou, nonce: 2n };
-const eurcIds = [iouId(PVP_HUB_EURC, eurcIou)].sort() as Hex[];
+const eurcId = iouId(PVP_HUB_EURC, eurcIou);
+const eurcConsumed: ConsumedIou[] = [
+  {
+    id: eurcId,
+    debtor: eurcIou.debtor,
+    creditor: eurcIou.creditor,
+    leafId: manifestLeafId(eurcId, eurcIou.debtor, eurcIou.creditor),
+  },
+];
 const pvpEurcLeg = buildProposal(PVP_HUB_EURC, 0n, {
   participants,
   deltas,
-  consumedIds: eurcIds,
+  consumed: eurcConsumed,
   settledVolume: 3_000_000n,
   grossVolume: 3_000_000n,
 });
@@ -108,6 +123,15 @@ const fixture = {
   manifestHash: mh,
   digest,
   iouId: id,
+  // v3 manifest chain: the single consumed obligation, its two parties, and
+  // the leaf they derive. ClearingHubV3Parity.t.sol asserts
+  // hub.manifestLeafId(consumedId0, partyA, partyB) == consumedLeaf0 and
+  // rootOf([consumedLeaf0]) == manifestHash, so nothing between the IOU and
+  // the signed digest is taken on trust across the stack boundary.
+  consumedId0: consumed[0].id,
+  consumedPartyA0: consumed[0].debtor,
+  consumedPartyB0: consumed[0].creditor,
+  consumedLeaf0: consumed[0].leafId,
   signer0: participants[0],
   consent0: consent,
   // pvp_* keys inserted BEFORE the iou_* group so regeneration is purely
@@ -231,6 +255,73 @@ const upperInput = [
 ];
 merkle["caseUpper_inputIds"] = upperInput;
 merkle["caseUpper_root"] = merkleRoot(upperInput);
+
+// ---------------------------------------------------------------------------
+// v3_* keys — the PARTY-BOUND LEAF vectors (CR-01). Three implementations now
+// derive this leaf: src/merkle.ts, ClearingHubV3.manifestLeafId and
+// PvPRouterV3's local mirror. MerkleParityV3.t.sol asserts all three against
+// these vectors, so a divergence in any one of them fails a test rather than
+// silently producing manifests the other two cannot reproduce.
+// ---------------------------------------------------------------------------
+
+/** Deterministic address from a fixed label — no key material needed, the leaf
+ *  derivation never signs anything. */
+function fixtureAddr(label: string): Address {
+  return ("0x" + keccak256(toHex(label)).slice(-40)) as Address;
+}
+
+// Single-leaf vector, plus the SWAPPED-argument form. Order-insensitivity is
+// load-bearing: it is what removes the role-swap footgun where a coordinator
+// that transposed debtor and creditor would commit a leaf the creditor's own
+// redemption check never reads.
+{
+  const leafIdInput = keccak256(toHex("merkle-fixture-v3-id")).toLowerCase() as Hex;
+  const lo = fixtureAddr("merkle-fixture-v3-party-lo");
+  const hi = fixtureAddr("merkle-fixture-v3-party-hi");
+  // Assert the fixture's own construction: the two must actually differ, and
+  // we record which is numerically lower so the Solidity side can check the
+  // canonical ordering rather than just the output hash.
+  if (lo.toLowerCase() === hi.toLowerCase()) throw new Error("v3 leaf parties collide");
+  const [low, high] =
+    lo.toLowerCase() < hi.toLowerCase() ? [lo, hi] : [hi, lo];
+  const leaf = manifestLeafId(leafIdInput, low, high);
+  const swapped = manifestLeafId(leafIdInput, high, low);
+  if (leaf !== swapped) throw new Error("manifestLeafId is not order-insensitive");
+  merkle["v3Leaf_id"] = leafIdInput;
+  merkle["v3Leaf_partyLo"] = low;
+  merkle["v3Leaf_partyHi"] = high;
+  merkle["v3Leaf_expected"] = leaf;
+}
+
+// Multi-entry manifest vector in CONSUMED-REF ORDER: the arrays below are
+// index-aligned and already sorted ASCENDING BY DERIVED LEAF, which is the
+// order ClearingHubV3.executeRound requires and ManifestMerkle.rootOf enforces.
+// Emitting them in that order is what pins the sort discipline across stacks —
+// a Solidity implementation that sorted by raw id would fail `rootOf`.
+{
+  const entries = [] as { id: Hex; partyA: Address; partyB: Address; leaf: Hex }[];
+  for (let i = 0; i < 5; i++) {
+    const entryId = keccak256(toHex(`merkle-fixture-v3-entry-${i}`)).toLowerCase() as Hex;
+    const partyA = fixtureAddr(`merkle-fixture-v3-entry-${i}-a`);
+    const partyB = fixtureAddr(`merkle-fixture-v3-entry-${i}-b`);
+    entries.push({ id: entryId, partyA, partyB, leaf: manifestLeafId(entryId, partyA, partyB) });
+  }
+  entries.sort((a, b) => (a.leaf < b.leaf ? -1 : a.leaf > b.leaf ? 1 : 0));
+  const leaves = entries.map((e) => e.leaf);
+  const rawIds = entries.map((e) => e.id);
+  // The whole point of the vector: leaf order is NOT id order. If the fixture
+  // ever degenerates into a case where they coincide, it stops testing the
+  // thing it exists to test.
+  const idsAscending = rawIds.every((v, i) => i === 0 || rawIds[i - 1] < v);
+  if (idsAscending) {
+    throw new Error("v3 manifest vector is ascending by raw id too — it no longer pins leaf order");
+  }
+  merkle["v3Manifest_ids"] = rawIds;
+  merkle["v3Manifest_partyA"] = entries.map((e) => e.partyA);
+  merkle["v3Manifest_partyB"] = entries.map((e) => e.partyB);
+  merkle["v3Manifest_leaves"] = leaves;
+  merkle["v3Manifest_root"] = merkleRoot(leaves);
+}
 
 const merkleOut = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "merkle.json");
 writeFileSync(merkleOut, JSON.stringify(merkle, null, 2) + "\n");
