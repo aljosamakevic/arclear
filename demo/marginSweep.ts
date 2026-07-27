@@ -35,6 +35,18 @@
  *   IM demanded a rise of more than 25% over the previous round's IM (where a
  *   +25%-per-round IM rise cap — the procyclicality guard — would bind and
  *   leave the member under-margined)
+ * - scored_observations / scored_positive_debits = the two sample sizes those
+ *   ratios divide by, emitted so every row is self-verifying
+ *
+ * EMPTY SAMPLES ARE NaN, NEVER 0. At high-abort cells the warmup (first N
+ * settled rounds per member) can consume every settled round, leaving a (q,N)
+ * row with no observation at all. Such rows emit "NaN" — a measured 0.0000 and
+ * "no data" must never be conflated (mirrors demo/thresholdSweep.ts). The
+ * committed docs/sweep/margin-sweep.csv PREDATES this marker: 36 of its 144
+ * rows are zero-observation cells whose four value columns read imputed
+ * 0.0000, and it has neither sample-size column. It is kept byte-identical;
+ * docs/CALIBRATION.md "Data notes (margin-sweep.csv)" enumerates the affected
+ * rows.
  *
  * Statistical division is reporting code (matching demo/sweep.ts's style) —
  * all protocol math inside the model stays bigint. Do not tune q/N or the
@@ -121,13 +133,34 @@ function mixSeed(s: number, n: number, pCode: number): number {
   );
 }
 
+/** Empty samples are reported as NaN (rendered verbatim "NaN" by toFixed) and
+ * never as a measured 0.0000 — the same convention demo/thresholdSweep.ts uses.
+ * Two independent sample sizes drive a row and are emitted alongside it:
+ * `scoredObservations` (all post-warmup observations, the denominator of
+ * cap_binding_fraction) and `scoredPositiveDebits` (the subset with a positive
+ * debit, the denominator of coverage_rate / p99_debit / p99_tail_coverage).
+ * A row can legitimately have observations but no positive debits, so the two
+ * are marked independently. NOTE: the committed docs/sweep/margin-sweep.csv
+ * predates this marker and these two columns — 36 of its 144 rows are
+ * zero-observation cells whose four value columns read imputed 0.0000; see
+ * docs/CALIBRATION.md "Data notes (margin-sweep.csv)". */
 interface ComboRow {
   q: number;
   lookback: number;
+  /** Post-warmup observations (denominator of capBindingFraction). */
+  scoredObservations: number;
+  /** Post-warmup observations with a positive debit (denominator of the rest). */
+  scoredPositiveDebits: number;
   coverageRate: number;
-  p99Debit: bigint;
+  /** null when no positive debit was scored — rendered "NaN", never 0. */
+  p99Debit: bigint | null;
   p99TailCoverage: number;
   capBindingFraction: number;
+}
+
+/** CSV cell for a possibly-absent bigint statistic. */
+function fmtDebit(x: bigint | null): string {
+  return x === null ? "NaN" : x.toString();
 }
 
 /** All 12 (q,N) rows for one flow cell. */
@@ -195,22 +228,27 @@ function runCell(fc: FlowCell): ComboRow[] {
 
       const coveredCount = positives.reduce((acc, o) => acc + (o.covered ? 1 : 0), 0);
       // p99 over scored positive debits (bigint-exact; same index convention
-      // as thresholdSweep's percentile helper).
-      let p99Debit = 0n;
+      // as thresholdSweep's percentile helper). null — never 0n — when the
+      // sample is empty, so no-data is never read as "the p99 debit was zero".
+      let p99Debit: bigint | null = null;
       if (positives.length > 0) {
         const sorted = positives.map((o) => o.debit).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
         p99Debit = sorted[Math.min(sorted.length - 1, Math.floor(0.99 * sorted.length))];
       }
-      const tail = positives.filter((o) => o.debit >= p99Debit);
+      const tail = p99Debit === null ? [] : positives.filter((o) => o.debit >= p99Debit);
       const tailCovered = tail.reduce((acc, o) => acc + (o.covered ? 1 : 0), 0);
 
       rows.push({
         q,
         lookback,
-        coverageRate: positives.length === 0 ? 0 : coveredCount / positives.length,
+        scoredObservations: scoredAll,
+        scoredPositiveDebits: positives.length,
+        // NaN, not 0: a cell with zero contributing observations must never be
+        // conflated with a measured 0.0000 (mirrors thresholdSweep's marker).
+        coverageRate: positives.length === 0 ? NaN : coveredCount / positives.length,
         p99Debit,
-        p99TailCoverage: tail.length === 0 ? 0 : tailCovered / tail.length,
-        capBindingFraction: scoredAll === 0 ? 0 : capBinding / scoredAll,
+        p99TailCoverage: tail.length === 0 ? NaN : tailCovered / tail.length,
+        capBindingFraction: scoredAll === 0 ? NaN : capBinding / scoredAll,
       });
     }
   }
@@ -229,6 +267,7 @@ const t0 = Date.now();
 
 const HEADER =
   "n,p_or_ramp,density,reciprocity,seeds,rounds_per_seed,q,ewma_lookback," +
+  "scored_observations,scored_positive_debits," +
   "coverage_rate,p99_debit,p99_tail_coverage,cap_binding_fraction";
 const lines: string[] = [HEADER];
 
@@ -246,20 +285,34 @@ for (const fc of FLOW_CELLS) {
         ROUNDS_PER_SEED,
         r.q,
         r.lookback,
+        r.scoredObservations,
+        r.scoredPositiveDebits,
         r.coverageRate.toFixed(4),
-        r.p99Debit.toString(),
+        fmtDebit(r.p99Debit),
         r.p99TailCoverage.toFixed(4),
         r.capBindingFraction.toFixed(4),
       ].join(","),
     );
   }
-  const best = rows.reduce((a, b) => (b.coverageRate > a.coverageRate ? b : a));
-  const worst = rows.reduce((a, b) => (b.coverageRate < a.coverageRate ? b : a));
+  // Rank only rows that have data — a NaN row is no-data, not a worst case.
+  const scored = rows.filter((r) => r.scoredPositiveDebits > 0);
+  const noData = rows.length - scored.length;
+  if (scored.length === 0) {
+    console.log(
+      `[sweep:margin] n=${fc.n} ${fc.label}: NO DATA — all ${rows.length} (q,N) rows have ` +
+        `zero scored positive-debit observations (warmup consumes every settled round) ` +
+        `(${((Date.now() - c0) / 1000).toFixed(1)}s, total ${((Date.now() - t0) / 1000).toFixed(1)}s)`,
+    );
+    continue;
+  }
+  const best = scored.reduce((a, b) => (b.coverageRate > a.coverageRate ? b : a));
+  const worst = scored.reduce((a, b) => (b.coverageRate < a.coverageRate ? b : a));
   console.log(
     `[sweep:margin] n=${fc.n} ${fc.label}: best (q=${best.q},N=${best.lookback}) ` +
       `cov ${(best.coverageRate * 100).toFixed(1)}% tail ${(best.p99TailCoverage * 100).toFixed(1)}% | ` +
       `worst (q=${worst.q},N=${worst.lookback}) cov ${(worst.coverageRate * 100).toFixed(1)}% ` +
       `tail ${(worst.p99TailCoverage * 100).toFixed(1)}% ` +
+      (noData > 0 ? `| ${noData}/${rows.length} rows NO DATA ` : "") +
       `(${((Date.now() - c0) / 1000).toFixed(1)}s, total ${((Date.now() - t0) / 1000).toFixed(1)}s)`,
   );
 }
