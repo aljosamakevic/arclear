@@ -1,5 +1,13 @@
 # Arclear — obligation-netting clearinghouse primitive on Arc (v1, 2-day build)
 
+> **Superseded — v1 historical record.** This is the frozen 2-day v1 build
+> plan, kept for provenance. Several statements below were true only of v1 and
+> are false of the shipped system: the manifest is now a merkle root (not a
+> plain keccak256), consent is threshold rather than unanimous, on-chain IOU
+> redemption exists, and the line counts here are pre-build estimates. For
+> what is actually deployed, read [README.md](../README.md),
+> [PROTOCOL.md](PROTOCOL.md) and [THREAT-MODEL.md](THREAT-MODEL.md).
+
 ## Context
 
 Submission for the Arc Open Source Showcase (arc-oss.thecanteenapp.com), which calls for standalone, forkable, well-documented **primitives** other Arc builders can adopt (shape: the circlefin/arc-* repos). Analysis of all 362 prior submissions (arc-showcase data) showed payment **netting** is genuine whitespace: 0 real implementations (4 name-collisions do allocation/escrow/lending instead), nothing in circlefin/arc-*, and no off-the-shelf external solution (OpenZeppelin has nothing; state channels are heavyweight and not x402/Arc-native).
@@ -18,7 +26,7 @@ Constraint: **~2 days of build time.** Everything below is scoped to that; stret
 
 ## Chain facts (verified from ~/.arc-canteen/context docs)
 
-- Chain ID **5042002**. RPC: use the user's Canteen endpoint `https://rpc.testnet.arc-node.thecanteenapp.com/v1/swrm_…` (token-bearing — lives ONLY in `.env` as `ARC_RPC_URL`, never committed or hardcoded; `.env.example` and all docs reference the public `https://rpc.testnet.arc.network` as the default/fallback). Explorer `https://testnet.arcscan.app` (Blockscout-style; verify via `forge verify-contract --verifier blockscout --verifier-url https://testnet.arcscan.app/api`, fallback: hardhat etherscan customChain with `apiKey: "empty"`).
+- Chain ID **5042002**. RPC: use a private provider endpoint if you have one (token-bearing — lives ONLY in `.env` as `ARC_RPC_URL`, never committed or hardcoded, and the hostname is not published here either; `.env.example` and all docs reference the public `https://rpc.testnet.arc.network` as the default/fallback). Explorer `https://testnet.arcscan.app` (Blockscout-style; verify via `forge verify-contract --verifier blockscout --verifier-url https://testnet.arcscan.app/api`, fallback: hardhat etherscan customChain with `apiKey: "empty"`).
 - Native gas token is USDC (native accounting 18 dec; ERC-20 interface 6 dec — don't mix). **Min base fee 20 gwei** → set `maxFeePerGas ≥ 25 gwei` everywhere or txs hang.
 - Faucet: https://faucet.circle.com/ (Arc Testnet; USDC + EURC). Deployer needs native USDC (gas) AND ERC-20 USDC (collateral).
 
