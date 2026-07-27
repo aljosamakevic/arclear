@@ -1,7 +1,7 @@
 import type { Address, Hex } from "viem";
 import type { PublicClient, WalletClient } from "viem";
 import { iouId } from "../src/iou.js";
-import { net } from "../src/netting.js";
+import { consumedIds, net } from "../src/netting.js";
 import {
   buildProposal,
   rebuildProposal,
@@ -10,7 +10,7 @@ import {
   verifyProposal,
 } from "../src/round.js";
 import { HubClient, MAX_LOG_SCAN_SPAN, scanWindows } from "../src/client.js";
-import { clearingHubV2Abi } from "../src/abi/ClearingHubV2.js";
+import { clearingHubV3Abi } from "../src/abi/ClearingHubV3.js";
 import type { NetResult, RoundProposal, SignedIou } from "../src/types.js";
 import type { AgentPersona } from "./agents.js";
 import { redactSensitive } from "./redact.js";
@@ -443,9 +443,16 @@ export class Coordinator {
     // CR-03: the pending record is the ONLY copy of the data needed to fold a
     // settlement whose receipt was lost. Overwriting it with a different
     // submission (a PvP leg landing on a coordinator that is already awaiting
-    // a receipt) destroys that evidence — and because ClearingHubV2 gates only
-    // on `redeemed[]`, with no on-chain settled-id nullifier, off-chain
-    // settledIds is the sole defense against re-netting settled paper. Refuse.
+    // a receipt) destroys that evidence. Refuse.
+    //
+    // v3 changed what is at stake here, and it is worth being precise about.
+    // Under V2 the loss was a genuine DOUBLE-SETTLE: the hub gated only on
+    // `redeemed[]`, so re-netting settled paper simply succeeded a second time
+    // and off-chain settledIds was the sole defense. ClearingHubV3's permanent
+    // `consumed` ledger closes that on-chain (`AlreadyConsumed`), so the loss
+    // is now a LIVENESS failure instead: the coordinator re-proposes paper the
+    // chain will refuse, burning a round and relayer gas until it re-learns
+    // what settled. Strictly less severe, still worth refusing outright.
     if (cur !== undefined && cur.digest.toLowerCase() !== p.digest.toLowerCase()) {
       throw new Error(
         `refusing to overwrite an unreconciled pending submission (round ${cur.roundNonce}, ` +
@@ -522,7 +529,7 @@ export class Coordinator {
     )) {
       const logs = await this.pub.getContractEvents({
         address: this.hub,
-        abi: clearingHubV2Abi,
+        abi: clearingHubV3Abi,
         eventName: "IouRedeemed",
         fromBlock,
         toBlock,
@@ -546,11 +553,11 @@ export class Coordinator {
   private async foldIfExecuted(record: PendingSubmission): Promise<boolean> {
     const logs = await this.pub.getContractEvents({
       address: this.hub,
-      // WR-02 (review): bind to the deployed contract's ABI. The v1 and v2
+      // WR-02 (review): bind to the deployed contract's ABI. The v1/v2/v3
       // RoundExecuted signatures happen to be byte-identical today, but a
-      // future V2 event change must not silently zero out this "was our
-      // round mined?" check — that would re-net already-settled paper.
-      abi: clearingHubV2Abi,
+      // future event change must not silently zero out this "was our round
+      // mined?" check — that would re-propose already-settled paper.
+      abi: clearingHubV3Abi,
       eventName: "RoundExecuted",
       args: { roundNonce: record.roundNonce },
       fromBlock: record.sentAtBlock,
@@ -562,6 +569,45 @@ export class Coordinator {
       for (const id of record.consumedIds) this.settledIds.add(id.toLowerCase() as Hex);
     }
     return ours;
+  }
+
+  /**
+   * v3 exclusivity self-heal. ClearingHubV3 makes "one IOU, one settlement" an
+   * ON-CHAIN invariant: a round naming a leaf some earlier round already netted
+   * reverts `AlreadyConsumed`, and one naming a redeemed id reverts
+   * `NullifiedIdInManifest`. V2 had neither gate — it accepted the duplicate
+   * and settled the same paper twice — so under V3 the coordinator's
+   * `settledIds`/`redeemedIds` stopped being a nicety and became a LIVENESS
+   * REQUIREMENT: a single stale entry makes every subsequent round revert, and
+   * since the nonce never moves, nothing else in the reconcile machinery can
+   * tell the coordinator why.
+   *
+   * This is the "why". Explicit gas skips simulation, so no decoded custom
+   * error ever reaches us — the classification must come from chain STATE. For
+   * each entry of the reverted proposal we ask the two ledgers directly and
+   * fold whatever they confirm, so the next round is assembled without that
+   * paper and settles normally. Returns how many entries were extinguished
+   * out from under us; 0 means the revert had some other cause.
+   *
+   * Reads are O(m) and only ever run on the failure path.
+   */
+  private async foldAlreadyExtinguished(proposal: RoundProposal): Promise<number> {
+    let folded = 0;
+    for (const c of proposal.consumed) {
+      // `consumed` is keyed by the PARTY-BOUND leaf — the same key
+      // executeRound writes and redeemIOU reads. Asking by raw id would ask
+      // the wrong question entirely.
+      if (await this.hubClient.consumed(c.leafId)) {
+        this.settledIds.add(c.id.toLowerCase() as Hex);
+        folded++;
+        continue;
+      }
+      if (await this.hubClient.redeemed(c.id)) {
+        this.redeemedIds.add(c.id.toLowerCase() as Hex);
+        folded++;
+      }
+    }
+    return folded;
   }
 
   /**
@@ -781,7 +827,7 @@ export class Coordinator {
         const record: PendingSubmission = {
           roundNonce: proposal.roundNonce,
           digest: proposal.digest,
-          consumedIds: proposal.consumedIds,
+          consumedIds: consumedIds(proposal.consumed),
           sentAtBlock,
         };
         this.recordPendingSubmission(record);
@@ -801,6 +847,18 @@ export class Coordinator {
             throw new Error(
               `WrongRoundNonce: on-chain nonce is ${onChainNonce}, submitted round used ` +
                 `${proposal.roundNonce} — a concurrent round executed (tx ${txHash})`,
+            );
+          }
+          // v3: the nonce did NOT move, so no round executed — which leaves
+          // the exclusivity gates as the likely cause. Ask both ledgers and
+          // fold what they confirm, so the next round is assembled clean
+          // instead of re-proposing paper the chain will keep refusing.
+          const extinguished = await this.foldAlreadyExtinguished(proposal);
+          if (extinguished > 0) {
+            throw new Error(
+              `AlreadyConsumed: ${extinguished} of ${proposal.consumed.length} obligation(s) in ` +
+                `round ${proposal.roundNonce} were already netted or redeemed on-chain — folded ` +
+                `into local state, next round rebuilds without them (tx ${txHash})`,
             );
           }
           throw new Error(`tx reverted: ${txHash}`);
@@ -849,7 +907,7 @@ export class Coordinator {
 
       const { proposal, result } = attempt;
       // Consumed ids join settledIds ONLY on confirmed settlement, never on abort.
-      for (const id of proposal.consumedIds) this.settledIds.add(id.toLowerCase() as Hex);
+      for (const c of proposal.consumed) this.settledIds.add(c.id.toLowerCase() as Hex);
       this.pendingSubmission = undefined; // folded — nothing left to reconcile (WR-01)
 
       const deltas: Record<string, string> = {};
@@ -863,7 +921,7 @@ export class Coordinator {
         participants: proposal.participants.length,
         grossVolume: result.grossVolume.toString(),
         settledVolume: result.settledVolume.toString(),
-        iouCount: proposal.consumedIds.length,
+        iouCount: proposal.consumed.length,
         deltas,
         excluded: attempt.excluded.map((a) => a.toLowerCase()),
         passCount: attempt.passCount,
@@ -882,6 +940,15 @@ export class Coordinator {
       if (msg.includes("WrongRoundNonce")) {
         this.phase = "aborted";
         this.phaseDetail = "stale roundNonce — a concurrent round executed";
+        return { outcome: "aborted", reason: redactSensitive(msg), excluded: [], passCount: 0 };
+      }
+      // v3 exclusivity class: someone else netted or redeemed our paper. The
+      // ledger reads in submit already folded it, so this is a recoverable
+      // ABORT, not a fault — wedging in `failed` would be the actual bug, since
+      // the very next round rebuilds without the extinguished obligations.
+      if (msg.includes("AlreadyConsumed")) {
+        this.phase = "aborted";
+        this.phaseDetail = "obligations already extinguished on-chain — rebuilding next round";
         return { outcome: "aborted", reason: redactSensitive(msg), excluded: [], passCount: 0 };
       }
       this.phase = "failed";

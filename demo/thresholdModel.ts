@@ -1,5 +1,5 @@
 import type { Hex } from "viem";
-import { net } from "../src/netting.js";
+import { consumedIds, net } from "../src/netting.js";
 import type { NetResult, SignedIou } from "../src/types.js";
 import { addr, generateFlows, rng } from "./flowModel.js";
 
@@ -164,7 +164,7 @@ export function simulateThresholdHistory(params: ThresholdParams): ThresholdHist
     excluded: string[],
     r: number,
   ): void => {
-    const consumed = new Set<string>(result.consumedIds);
+    const consumed = new Set<string>(consumedIds(result.consumed));
     const deltas = new Map<string, bigint>();
     result.participants.forEach((p, i) => deltas.set(p.toLowerCase(), result.deltas[i]));
     const outflows = new Map<string, bigint>();
@@ -174,7 +174,7 @@ export function simulateThresholdHistory(params: ThresholdParams): ThresholdHist
       outflows.set(debtor, (outflows.get(debtor) ?? 0n) + s.iou.amount);
     }
     // CONS-04 "never twice": consumed ids join settledIds only on settlement.
-    for (const id of result.consumedIds) {
+    for (const id of consumedIds(result.consumed)) {
       settledIds.add(id);
       const latency = r - (firstEligibleRound.get(id) ?? r);
       // Paper that settled in its first eligible round is not excluded paper.
@@ -188,7 +188,7 @@ export function simulateThresholdHistory(params: ThresholdParams): ThresholdHist
       excluded,
       settledVolume: result.settledVolume,
       grossVolume: result.grossVolume,
-      consumedCount: result.consumedIds.length,
+      consumedCount: result.consumed.length,
       deltas,
       outflows,
     });

@@ -22,10 +22,11 @@ import { signIou } from "../src/iou.js";
 import { net } from "../src/netting.js";
 import { signConsent } from "../src/round.js";
 import { signPvPConsent, verifyPvPProposal } from "../src/pvp.js";
-import { clearingHubV2Abi, clearingHubV2Bytecode } from "../src/abi/ClearingHubV2.js";
-import { clearingHubBytecode } from "../src/abi/ClearingHub.js";
-import { pvpRouterBytecode } from "../src/abi/PvPRouter.js";
-import type { HubClient } from "../src/client.js";
+import { clearingHubV3Bytecode } from "../src/abi/ClearingHubV3.js";
+import { clearingHubV2Bytecode } from "../src/abi/ClearingHubV2.js";
+import { pvpRouterV3Bytecode } from "../src/abi/PvPRouterV3.js";
+import { REDEEM_IOU_GAS, type HubClient } from "../src/client.js";
+import { manifestLeafId } from "../src/merkle.js";
 import type { PvPProposal, SignedIou } from "../src/types.js";
 import { quoteToRate, sampleQuote, type FxQuote } from "./fx.js";
 import { attemptPvPRound, fxTradePair, runPvPRound, type PvPConsentProvider } from "./pvp.js";
@@ -48,18 +49,21 @@ function check(cond: boolean, label: string) {
 const env = await setup(mode);
 console.log(`[e2e] mode=${mode} hub=${env.hub} token=${env.token}`);
 
-// Pitfall 2 guard: prove the hub runs genuine V2 bytecode, not v1 masquerading.
+// Pitfall 2 guard: prove the hub runs genuine V3 bytecode, not V2 masquerading.
 // The 53-byte CBOR metadata tail is shared between creation and runtime code
 // and unique per compiled source, so a tail compare against the creation
-// bytecode catches "silently exercising v1" without immutable-slot noise.
+// bytecode catches "silently exercising the superseded hub" without
+// immutable-slot noise. V2 is the dangerous confusion now, not v1: its ABI
+// overlaps V3's on every read this script uses, but its redemption is the
+// defeatable one this whole run exists to prove fixed.
 const deployedCode = (await env.pub.getCode({ address: env.hub })) ?? "0x";
 const tail = (h: string) => h.slice(-106);
 console.log(`[e2e] deployed code tail ${tail(deployedCode)}`);
 if (mode === "anvil") {
-  check(tail(deployedCode) === tail(clearingHubV2Bytecode), "hub bytecode matches ClearingHubV2 (metadata tail)");
-  check(tail(deployedCode) !== tail(clearingHubBytecode), "hub bytecode differs from v1 ClearingHub");
-} else if (tail(deployedCode) !== tail(clearingHubV2Bytecode)) {
-  console.log(`[e2e] warn — testnet hub metadata tail differs from local V2 artifact (code hash ${keccak256(deployedCode as Hex)})`);
+  check(tail(deployedCode) === tail(clearingHubV3Bytecode), "hub bytecode matches ClearingHubV3 (metadata tail)");
+  check(tail(deployedCode) !== tail(clearingHubV2Bytecode), "hub bytecode differs from ClearingHubV2");
+} else if (tail(deployedCode) !== tail(clearingHubV3Bytecode)) {
+  console.log(`[e2e] warn — testnet hub metadata tail differs from local V3 artifact (code hash ${keccak256(deployedCode as Hex)})`);
 }
 
 const coordinator = new Coordinator(
@@ -254,12 +258,17 @@ check(
 await assertDeltas(beforeN1, roundN1.round.deltas, "round n+1");
 printReport(roundN1.round, env.explorerTx);
 
-// ── D-17 redemption scenario (MERK-03/MERK-04) ───────────────────────────────
-// Dark debtor → creditor self-serve recovery from calldata-reconstructed
-// proofs → permanent netting exclusion. Eligibility is asserted from the
-// ON-CHAIN condition (lastRound/roundNonce reads over EXECUTED rounds) —
-// coordinator counters are early warning only and never consulted (D-09).
-console.log("[e2e] redemption scenario: dark debtor → creditor recovers from chain data …");
+// ── D-17 redemption scenario (v3 CR-02) ──────────────────────────────────────
+// Dark debtor → creditor self-serve recovery with NO PROOFS → permanent
+// netting exclusion. Eligibility is asserted from the ON-CHAIN condition
+// (lastRound/roundNonce reads over EXECUTED rounds) — coordinator counters are
+// early warning only and never consulted (D-09).
+//
+// What changed from V2: the creditor no longer reconstructs one non-inclusion
+// proof per buffered root. ClearingHubV3 gates on `consumed[leafId]`, a single
+// permanent storage read, so recovery is one unadorned transaction whose
+// success cannot be eroded by anything a third party does.
+console.log("[e2e] redemption scenario: dark debtor → creditor recovers, no proofs …");
 const redemptionCreditor = env.personas[3]; // Trader
 const redemptionAmount = 300_000n / divisor; // fixed base units
 const redemptionPairKey = `${staller.account.address}->${redemptionCreditor.account.address}`;
@@ -273,7 +282,8 @@ const redemptionIou = await signIou(
     amount: redemptionAmount,
     nonce: redemptionNonce,
     // L-convention boundary: expiry = now + L is the latest an honest signer
-    // may pick, keeping every possibly-consuming round inside [expiry-L, expiry).
+    // may pick. Under v3 that is hygiene, not a redemption precondition —
+    // ClearingHubV3 deleted the coverage rule the bound used to feed.
     expiry: now() + 86_400n,
     ref: keccak256(toHex(`redemption ${staller.name}->${redemptionCreditor.name} #${redemptionNonce}`)) as Hex,
   },
@@ -287,11 +297,7 @@ coordinator.addIous([redemptionIou]);
 // personas — an aborted round advances no on-chain clock, so each round below
 // must genuinely execute (Pitfall 4).
 staller.stalled = true;
-const K: bigint = await env.pub.readContract({
-  address: env.hub,
-  abi: clearingHubV2Abi,
-  functionName: "K",
-});
+const K = await env.hubClient.K();
 const othersOnly = env.personas.filter((p) => p !== staller);
 for (let i = 1n; i <= K; i++) {
   const staleTraffic = await simulateTraffic(env.hub, othersOnly, 30, {
@@ -319,11 +325,29 @@ check(
   `on-chain staleness holds: roundNonce ${nonceBeforeRedeem} >= lastRound ${lastRoundStaller} + K ${K}`,
 );
 
-// Creditor path: reconstruct every buffered manifest from executeRound
-// calldata (never a coordinator endpoint) and submit redeemIOU themselves.
+// Creditor path (v3): no proof assembly at all. The one precondition the
+// creditor can check for themselves is the consumption ledger — assert it
+// BOTH ways round (SDK-derived leaf and the hub's own read) so the redemption
+// is known to be legitimate before a single wei of gas is spent, and so a
+// TS↔Solidity divergence in the leaf derivation surfaces here rather than as
+// an inscrutable revert.
 const debtorBefore = await env.hubClient.collateral(staller.account.address);
 const creditorBefore = await env.hubClient.collateral(redemptionCreditor.account.address);
-const proofs = await env.hubClient.prepareRedemptionProofs(redemptionIou.id);
+const redemptionLeaf = manifestLeafId(
+  redemptionIou.id,
+  redemptionIou.iou.debtor,
+  redemptionIou.iou.creditor,
+);
+check(
+  (await env.hubClient.manifestLeafId(
+    redemptionIou.id,
+    redemptionIou.iou.debtor,
+    redemptionIou.iou.creditor,
+  )).toLowerCase() === redemptionLeaf.toLowerCase(),
+  "SDK manifestLeafId matches the hub's on-chain derivation (live parity)",
+);
+check(!(await env.hubClient.consumed(redemptionLeaf)), "consumed(leaf) is false — the IOU was never netted");
+check(!(await env.hubClient.isConsumed(redemptionIou.iou)), "isConsumed(iou) agrees with consumed(leaf)");
 const creditorWallet = createWalletClient({
   account: redemptionCreditor.account,
   chain: env.chain,
@@ -333,10 +357,10 @@ const redeemTx = await env.hubClient.redeemIOU(
   creditorWallet,
   redemptionIou.iou,
   redemptionIou.signature,
-  proofs,
 );
 const redeemReceipt = await env.pub.waitForTransactionReceipt({ hash: redeemTx });
-check(redeemReceipt.status === "success", `redeemIOU mined successfully (${redeemTx})`);
+check(redeemReceipt.status === "success", `redeemIOU mined successfully, no proofs (${redeemTx})`);
+console.log(`[e2e] redeemIOU gasUsed=${redeemReceipt.gasUsed} (limit ${REDEEM_IOU_GAS})`);
 
 const debtorAfter = await env.hubClient.collateral(staller.account.address);
 const creditorAfter = await env.hubClient.collateral(redemptionCreditor.account.address);
@@ -387,6 +411,38 @@ check(
   !coordinator.settledIds.has(redemptionId),
   "redeemed id absent from the union of every consumed manifest — it can never settle (MERK-04/D-17)",
 );
+// v3 strengthens that from a coordinator-state claim to a CHAIN claim: the
+// consumption ledger is permanent and third-party-writable only under pairs
+// that signed, so "no round ever netted this leaf" is checkable directly.
+check(
+  !(await env.hubClient.consumed(redemptionLeaf)),
+  "consumed(leaf) is STILL false on-chain after the tail round — exclusivity asserted from the ledger, not from coordinator state",
+);
+// Manifest reconstruction (no longer a redemption dependency, still the
+// independent audit path): rebuild the tail round's leaf set from calldata
+// alone and confirm it commits exactly what the coordinator recorded.
+{
+  const rebuilt = await env.hubClient.fetchManifest(BigInt(tailRound.round.roundNonce));
+  const rebuiltIds = new Set(rebuilt.map((r) => r.id.toLowerCase()));
+  check(
+    rebuilt.length === tailRound.round.iouCount,
+    `tail manifest reconstructed from calldata has ${rebuilt.length} entries (round recorded ${tailRound.round.iouCount})`,
+  );
+  check(
+    [...consumedTail].every((id) => rebuiltIds.has(id)),
+    "every id the coordinator folded appears in the calldata-reconstructed manifest",
+  );
+  check(
+    rebuilt.every(
+      (r) => manifestLeafId(r.id, r.partyA, r.partyB).toLowerCase() === r.leafId.toLowerCase(),
+    ),
+    "every reconstructed ref's party attribution re-derives its committed leaf",
+  );
+  check(
+    !rebuilt.some((r) => r.leafId.toLowerCase() === redemptionLeaf.toLowerCase()),
+    "the redeemed obligation's leaf is absent from the reconstructed manifest",
+  );
+}
 await assertDeltas(beforeTail, tailRound.round.deltas, "tail round");
 printReport(tailRound.round, env.explorerTx);
 
@@ -404,9 +460,9 @@ printReport(tailRound.round, env.explorerTx);
   // warning on testnet — same idiom as the hub check above.
   const routerCode = (await env.pub.getCode({ address: env.router })) ?? "0x";
   if (mode === "anvil") {
-    check(tail(routerCode) === tail(pvpRouterBytecode), "router bytecode matches PvPRouter (metadata tail)");
-  } else if (tail(routerCode) !== tail(pvpRouterBytecode)) {
-    console.log(`[e2e] warn — testnet router metadata tail differs from local PvPRouter artifact (code hash ${keccak256(routerCode as Hex)})`);
+    check(tail(routerCode) === tail(pvpRouterV3Bytecode), "router bytecode matches PvPRouterV3 (metadata tail)");
+  } else if (tail(routerCode) !== tail(pvpRouterV3Bytecode)) {
+    console.log(`[e2e] warn — testnet router metadata tail differs from local PvPRouterV3 artifact (code hash ${keccak256(routerCode as Hex)})`);
   }
 
   const coordinatorEurc = new Coordinator(
