@@ -1,4 +1,4 @@
-import { concat, keccak256, type Hex } from "viem";
+import { concat, keccak256, type Address, type Hex } from "viem";
 
 /** RFC 6962 leaf-domain prefix: leaves hash as keccak256(0x00 ‖ id). */
 const LEAF_PREFIX: Hex = "0x00";
@@ -12,7 +12,60 @@ const NODE_PREFIX: Hex = "0x01";
 export const EMPTY_MANIFEST_ROOT: Hex = keccak256("0x");
 
 /**
- * Claim that `leaf` (a raw IOU id, pre-leaf-hash) sits at `index` in a
+ * The v3 manifest leaf, and the hub's consumption-ledger key, for one consumed
+ * IOU: `keccak256(id ‖ lo ‖ hi)` where `(lo, hi)` is the party pair ordered
+ * ascending by address. TS twin of `ClearingHubV3.manifestLeafId` and of
+ * `PvPRouterV3.manifestLeafId` — byte-parity is asserted from the shared
+ * fixture (test/merkleParity.test.ts ↔ contracts/test/MerkleParityV3.t.sol).
+ *
+ * THE CR-01 FIX, in one function. V2 committed the raw id, which bound the
+ * leaf to nobody: any address pair could write a victim's id into a manifest
+ * and permanently defeat its redemption. Binding the pair means an attacker
+ * pairing a victim's id with their OWN addresses derives a DIFFERENT leaf,
+ * which no honest redemption ever reads.
+ *
+ * Order-insensitive by construction (the pair is sorted before hashing), so
+ * debtor/creditor may be supplied either way round — which of the two is the
+ * debtor is already fixed inside `id` itself, since `hashIou` covers both.
+ * `abi.encodePacked` parity is unambiguous: all three operands are fixed-width
+ * (32 + 20 + 20 bytes), so no packing collision exists.
+ */
+export function manifestLeafId(id: Hex, partyA: Address, partyB: Address): Hex {
+  const a = partyA.toLowerCase() as Hex;
+  const b = partyB.toLowerCase() as Hex;
+  if (!/^0x[0-9a-f]{64}$/.test(id.toLowerCase())) {
+    throw new Error(`manifestLeafId: id is not bytes32 hex: ${id}`);
+  }
+  if (!/^0x[0-9a-f]{40}$/.test(a)) throw new Error(`manifestLeafId: partyA is not an address: ${partyA}`);
+  if (!/^0x[0-9a-f]{40}$/.test(b)) throw new Error(`manifestLeafId: partyB is not an address: ${partyB}`);
+  // Fixed-width lowercase hex compares exactly like the EVM's uint160 `<`.
+  const [lo, hi] = a < b ? [a, b] : [b, a];
+  return keccak256(concat([id.toLowerCase() as Hex, lo, hi]));
+}
+
+/**
+ * ── Merkle proof primitives: NO LONGER ON ANY PROTOCOL PATH (v3) ────────────
+ *
+ * ClearingHubV3 replaced V2's negative-proof redemption regime with a positive
+ * on-chain consumption ledger, so `redeemIOU` takes no proofs and nothing in
+ * the SDK, the demo or either V3 contract generates or verifies one.
+ *
+ * They are kept, not deleted, for exactly one reason: `ManifestMerkle.sol` —
+ * which V3 still uses for `rootOf` and which is frozen — still ships
+ * `verifyInclusion` and `verifyNonInclusion`, and the shared fixture
+ * (test/fixtures/merkle.json) is what pins their byte layout. Deleting the TS
+ * twin would leave the Solidity half of a live dual implementation with no
+ * cross-stack check, which is a strict regression in the parity discipline.
+ * Both directions stay asserted per vector in test/merkleParity.test.ts.
+ *
+ * Positive inclusion proofs also remain independently meaningful under v3: a
+ * third party can still prove "round N's signed manifest committed this leaf"
+ * from calldata alone. What is dead is the NEGATIVE claim as a redemption
+ * precondition — `consumed[leafId]` answers that in O(1) with no proof at all.
+ */
+
+/**
+ * Claim that `leaf` (a manifest leaf id, pre-leaf-hash) sits at `index` in a
  * manifest of `leafCount` sorted leaves. `siblings` is bottom-up; promotion
  * levels consume no sibling. Mirrored exactly by the Solidity struct.
  */
@@ -75,14 +128,20 @@ function normalize(sortedIds: Hex[]): Hex[] {
 }
 
 /**
- * Sorted-leaf merkle root over consumed-IOU ids. Pure function; keccak
+ * Sorted-leaf merkle root over a manifest's leaves. Pure function; keccak
  * hashing only — no division anywhere in the protocol (index arithmetic is
  * shift-based). The 0x00/0x01 prefixes are RFC 6962 domain separation, but
  * the tree SHAPE is level-wise pairing with lone-node promotion — NOT the
  * RFC 6962 largest-power-of-two split.
  *
+ * v3: the leaves this receives are PARTY-BOUND leaf ids (`manifestLeafId`),
+ * not raw IOU ids — `ClearingHubV3.executeRound` derives exactly those before
+ * calling `ManifestMerkle.rootOf`, so the ascent precondition below is ascent
+ * BY DERIVED LEAF. The hashing itself is unchanged and stays byte-parity-locked
+ * against the frozen `ManifestMerkle.sol`.
+ *
  * Rules (spec: docs/PROTOCOL.md — third parties must implement identically):
- * 1. Ids normalize to lowercase, then must be strictly ascending and unique
+ * 1. Leaves normalize to lowercase, then must be strictly ascending and unique
  *    (build-time precondition: throws otherwise; lowercase hex lexicographic
  *    order == numeric bytes32 order).
  * 2. Leaf: keccak256(0x00 ‖ id).

@@ -29,8 +29,19 @@ export const MIN_MAX_FEE_PER_GAS = 25_000_000_000n; // 25 gwei
 
 /**
  * D-15 signing convention bound L: refuse to sign IOUs with expiry > now + L.
- * UNCALIBRATED — mirrors the hub's MAX_IOU_LIFETIME immutable deploy default
- * (86,400s); Phase 3 owns the real calibration.
+ * UNCALIBRATED (86,400s); Phase 3 owns the real calibration.
+ *
+ * v3 DEMOTED THIS FROM A PROTOCOL REQUIREMENT TO A HYGIENE CONVENTION. Under
+ * V2 it was load-bearing: redemption's coverage precondition compared the
+ * oldest buffered root's timestamp against `expiry - L`, so an IOU signed past
+ * the convention weakened its own redeemability. ClearingHubV3 deleted both
+ * `MAX_IOU_LIFETIME` and the coverage rule (CR-02) — redemption is now an O(1)
+ * `consumed[leafId]` read with no timing component at all, so nothing on-chain
+ * reads L any more.
+ *
+ * It is kept because bounding how long signed paper can sit outstanding is
+ * still sound counterparty-risk practice (it bounds the window in which a
+ * debtor's collateral must remain sufficient), NOT because any hub enforces it.
  */
 export const DEFAULT_MAX_IOU_LIFETIME_SECONDS = 86_400n;
 
@@ -75,10 +86,16 @@ export const ROUND_TYPES = {
  * pair via constructor immutables, so a PvPRound signature in this domain is
  * consent to legs on exactly that pair. Distinct name keeps wallet display
  * and fixtures self-describing.
+ *
+ * v3: the name is `"ArclearPvPRouterV3"`, matching PvPRouterV3.sol. Both the
+ * name AND `verifyingContract` differ from the V2 router's
+ * `("ArclearPvPRouter", "1")`, so a bundle consent signed for one router can
+ * never be replayed as consent for the other — even though PVP_ROUND_TYPEHASH
+ * is byte-identical between them.
  */
 export function pvpDomain(router: Address, chainId: number = ARC_TESTNET_CHAIN_ID) {
   return {
-    name: "ArclearPvPRouter",
+    name: "ArclearPvPRouterV3",
     version: "1",
     chainId,
     verifyingContract: router,
@@ -86,7 +103,8 @@ export function pvpDomain(router: Address, chainId: number = ARC_TESTNET_CHAIN_I
 }
 
 /**
- * Canonical typehash (must byte-match PvPRouter.sol):
+ * Canonical typehash (byte-matches PvPRouterV3.sol, and PvPRouter.sol before
+ * it — only the domain separator distinguishes the two routers):
  * PvPRound(bytes32 usdcLegDigest,bytes32 eurcLegDigest,uint256 fxNumerator,uint256 fxDenominator)
  */
 export const PVP_TYPES = {

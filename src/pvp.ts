@@ -7,6 +7,7 @@ import {
 import type { Account } from "viem/accounts";
 import { pvpDomain, PVP_TYPES } from "./domain.js";
 import { iouId } from "./iou.js";
+import { manifestLeafId } from "./merkle.js";
 import { verifyProposal } from "./round.js";
 import type { PvPProposal, RoundProposal, SignedIou } from "./types.js";
 
@@ -35,8 +36,9 @@ function proposalFields(proposal: PvPProposal) {
 
 /**
  * The EIP-712 PvPRound digest every union member signs — binds both leg
- * digests and the agreed rate. Typehash (byte-matches PvPRouter.sol):
+ * digests and the agreed rate. Typehash (byte-matches PvPRouterV3.sol):
  * PvPRound(bytes32 usdcLegDigest,bytes32 eurcLegDigest,uint256 fxNumerator,uint256 fxDenominator)
+ * The domain is `("ArclearPvPRouterV3", "1")` — see pvpDomain.
  */
 export function pvpDigest(
   router: Address,
@@ -275,10 +277,12 @@ function verifyPvPProposalOrThrow(
   // and would refuse honest rounds.
   const usdcByRef = byRef(myIousUsdc);
   const eurcByRef = byRef(myIousEurc);
-  // Leg-manifest id sets for the CR-01 inclusion-symmetry check below —
-  // "lowercase id -> present in that leg's consumedIds".
-  const usdcConsumed = new Set(proposal.usdcLeg.consumedIds.map((i) => i.toLowerCase()));
-  const eurcConsumed = new Set(proposal.eurcLeg.consumedIds.map((i) => i.toLowerCase()));
+  // Leg-manifest LEAF sets for the CR-01 inclusion-symmetry check below —
+  // "lowercase party-bound leaf -> present in that leg's manifest". v3 matches
+  // on the leaf, not the id, so a coordinator cannot satisfy symmetry by
+  // listing our id under a party pair the hub will never mark consumed for us.
+  const usdcConsumed = new Set(proposal.usdcLeg.consumed.map((c) => c.leafId.toLowerCase()));
+  const eurcConsumed = new Set(proposal.eurcLeg.consumed.map((c) => c.leafId.toLowerCase()));
   for (const [ref, uList] of usdcByRef) {
     const eList = eurcByRef.get(ref);
     if (!eList) continue;
@@ -312,11 +316,14 @@ function verifyPvPProposalOrThrow(
     // other (padding that leg with unrelated paper to keep quorum) — the
     // per-leg verifyProposal above never runs for a leg the member was
     // stripped from, so this cross-leg check is the ONLY guard.
-    // CR-01: derive both ids from their own hub — a forged SignedIou.id would
-    // otherwise let a coordinator fake symmetry against a manifest that holds
-    // the real (derived) leaves.
-    const uIn = usdcConsumed.has(iouId(hubUsdc, u, opts.chainId).toLowerCase());
-    const eIn = eurcConsumed.has(iouId(hubEurc, e, opts.chainId).toLowerCase());
+    // CR-01: derive both ids from their own hub AND both leaves from the ids'
+    // own parties — a forged SignedIou.id, or a leaf attributed to the wrong
+    // pair, would otherwise let a coordinator fake symmetry against a manifest
+    // that holds the real (derived) leaves.
+    const uLeaf = manifestLeafId(iouId(hubUsdc, u, opts.chainId), u.debtor, u.creditor);
+    const eLeaf = manifestLeafId(iouId(hubEurc, e, opts.chainId), e.debtor, e.creditor);
+    const uIn = usdcConsumed.has(uLeaf.toLowerCase());
+    const eIn = eurcConsumed.has(eLeaf.toLowerCase());
     if (uIn !== eIn) {
       const [inSide, outSide, outLeg] = uIn
         ? (["USDC", "EURC", "eurc"] as const)
@@ -325,7 +332,7 @@ function verifyPvPProposalOrThrow(
         ok: false,
         reason:
           `FX ref ${ref} inclusion asymmetry: the ${inSide} side is consumed by its leg but the ` +
-          `${outSide} counter-IOU is missing from the ${outLeg} leg's consumedIds — one side of ` +
+          `${outSide} counter-IOU is missing from the ${outLeg} leg's manifest — one side of ` +
           `the trade would settle without its twin`,
       };
     }
