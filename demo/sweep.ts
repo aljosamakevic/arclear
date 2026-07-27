@@ -40,7 +40,11 @@ interface RunMetrics {
 function run(n: number, density: number, reciprocity: number, seed: number): RunMetrics | null {
   const ious = generateFlows({ n, density, reciprocity, seed });
   if (ious.length === 0) return null;
-  const r = net(ious, { now: NOW });
+  // Synthetic flows: generateFlows hands out counter ids, not EIP-712 digests,
+  // and this harness never signs, submits, or settles anything. Opting out of
+  // id derivation is what keeps the compression sweep a pure-algebra model
+  // (CR-01's derivation is mandatory for every path that touches real paper).
+  const r = net(ious, { now: NOW, unsafeTrustProvidedIds: true });
   const gross = r.grossVolume;
   if (gross === 0n) return null;
 

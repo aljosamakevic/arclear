@@ -13,6 +13,7 @@ import {
   simulateThresholdHistory,
   type ThresholdRoundRecord,
 } from "../demo/thresholdModel.js";
+import { iouId } from "../src/iou.js";
 import { signConsent } from "../src/round.js";
 import type { SignedIou } from "../src/types.js";
 
@@ -33,10 +34,16 @@ import type { SignedIou } from "../src/types.js";
  * Address remapping: flowModel's synthetic member addresses cannot sign, so
  * member i's synthetic address is remapped to a deterministic viem account
  * (private key = hex(i+1) left-padded to 64 nibbles). netting never checks
- * IOU signatures and the remap leaves ids untouched, so net() consumes the
- * exact same obligations on both sides. Batches come from roundFlowBatch
- * (round-unique ids) — NEVER raw generateFlows, whose per-call id counter
- * reset would corrupt model and harness identically and hide the bug.
+ * IOU signatures, so net() consumes the exact same obligations on both sides.
+ * Batches come from roundFlowBatch (round-unique ids) — NEVER raw
+ * generateFlows, whose per-call id counter reset would corrupt model and
+ * harness identically and hide the bug.
+ *
+ * Id remapping (CR-01): the real attemptRound derives ids from (hub, iou), so
+ * the harness carries the model's round-tagged id into the IOU's `ref` field
+ * and sets `.id` to the derived digest. `ref` is netting-inert, so the two
+ * sides still consume identical obligations — the harness just gets real ids
+ * instead of counters, and keeps the model's round-uniqueness property.
  */
 
 const HUB = "0x1111111111111111111111111111111111111111" as Address;
@@ -119,14 +126,19 @@ async function runSeed(
     // SAME batch as the model (round-unique ids), addresses remapped only.
     const batch = roundFlowBatch(seed, r, { n, density: DENSITY, reciprocity: RECIPROCITY });
     for (const s of batch) {
-      openPool.push({
-        ...s,
-        iou: {
-          ...s.iou,
-          debtor: remap.get(s.iou.debtor.toLowerCase())!,
-          creditor: remap.get(s.iou.creditor.toLowerCase())!,
-        },
-      });
+      // CR-01: the real attemptRound DERIVES ids from (hub, iou), so the
+      // harness must hand it structurally real paper. The model's round-tagged
+      // synthetic id becomes the IOU's `ref` — a bytes32 field inside the
+      // digest — which reproduces the model's round-uniqueness property
+      // (identical flows in different rounds stay distinct obligations)
+      // without touching any netting-relevant field.
+      const iou = {
+        ...s.iou,
+        debtor: remap.get(s.iou.debtor.toLowerCase())!,
+        creditor: remap.get(s.iou.creditor.toLowerCase())!,
+        ref: s.id,
+      };
+      openPool.push({ ...s, iou, id: iouId(HUB, iou) });
     }
 
     const attempt = await attemptRound({

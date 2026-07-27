@@ -17,7 +17,14 @@ export interface Iou {
 export interface SignedIou {
   iou: Iou;
   signature: Hex;
-  /** hashTypedData of the IOU — dedup key and manifest leaf. */
+  /**
+   * hashTypedData of the IOU — dedup key and manifest leaf.
+   *
+   * DERIVED, never asserted: the debtor's signature covers `iou` only, so this
+   * field carries no authority whatsoever. Every consumer that can reach the
+   * hub address re-derives it with `iouId(hub, iou)` and ignores what is here
+   * (CR-01) — treat it as a cache of the derivation, not as input.
+   */
   id: Hex;
 }
 

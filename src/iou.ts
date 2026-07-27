@@ -19,14 +19,36 @@ function iouMessage(iou: Iou) {
   };
 }
 
+/**
+ * Memo for iouId, keyed by the Iou OBJECT then by "hub:chainId".
+ *
+ * Load-bearing for CR-01: since ids are now DERIVED wherever they are
+ * consumed, `net()` hashes the whole pool on every call — and verifyProposal
+ * re-nets once per participant per pass, so the demo's 105-IOU pool would
+ * otherwise cost ~10^4 EIP-712 hashes per round. Keying on object identity is
+ * sound because `Iou` is an immutable value object by contract (src/types.ts);
+ * a caller who mutates one has already invalidated its signature.
+ */
+const idMemo = new WeakMap<Iou, Map<string, Hex>>();
+
 /** Canonical id: the EIP-712 digest that is also what the debtor signs. */
 export function iouId(hub: Address, iou: Iou, chainId?: number): Hex {
-  return hashTypedData({
+  const key = `${hub.toLowerCase()}:${chainId ?? ""}`;
+  let perDomain = idMemo.get(iou);
+  const hit = perDomain?.get(key);
+  if (hit !== undefined) return hit;
+  const id = hashTypedData({
     domain: domain(hub, chainId),
     types: IOU_TYPES,
     primaryType: "IOU",
     message: iouMessage(iou),
   });
+  if (perDomain === undefined) {
+    perDomain = new Map<string, Hex>();
+    idMemo.set(iou, perDomain);
+  }
+  perDomain.set(key, id);
+  return id;
 }
 
 /**
@@ -83,12 +105,24 @@ export async function signIou(
   return { iou, signature, id: iouId(hub, iou, chainId) };
 }
 
-/** Verify the debtor's signature over the IOU. */
+/**
+ * Verify the debtor's signature over the IOU AND that `signed.id` is the id
+ * that IOU actually has.
+ *
+ * CR-01: the signature covers the IOU struct only, so a valid signature says
+ * nothing about the accompanying `id` — and the id is what becomes the
+ * manifest leaf (and therefore what the hub's non-inclusion regime treats as
+ * "already settled"). A forged id lets the same signed IOU be settled in a
+ * round AND later redeemed via redeemIOU, debiting the debtor twice. The id is
+ * derived, never asserted (src/types.ts), so re-deriving it here is what makes
+ * "verified" mean the whole object.
+ */
 export async function verifyIou(
   hub: Address,
   signed: SignedIou,
   chainId?: number,
 ): Promise<boolean> {
+  if (signed.id?.toLowerCase() !== iouId(hub, signed.iou, chainId).toLowerCase()) return false;
   return verifyTypedData({
     address: signed.iou.debtor,
     domain: domain(hub, chainId),

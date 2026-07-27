@@ -565,10 +565,17 @@ printReport(tailRound.round, env.explorerTx);
    *  hub — the e2e's own math, independent of anything the wrapper reports. */
   const localDeltas = (
     open: SignedIou[],
-    leg: { settledIds: Set<Hex>; redeemedIds: Set<Hex> },
+    leg: { hub: Address; settledIds: Set<Hex>; redeemedIds: Set<Hex> },
     at: bigint,
   ): Record<string, string> => {
-    const result = net(open, { now: at, settledIds: leg.settledIds, redeemedIds: leg.redeemedIds });
+    const result = net(open, {
+      now: at,
+      settledIds: leg.settledIds,
+      redeemedIds: leg.redeemedIds,
+      // CR-01: same hub binding the coordinator used — derived ids on both sides.
+      hub: leg.hub,
+      chainId: env.chain.id,
+    });
     const deltas: Record<string, string> = {};
     result.participants.forEach((p, i) => {
       deltas[p.toLowerCase()] = result.deltas[i].toString();

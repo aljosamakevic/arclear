@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { keccak256, toHex, type Address, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { signIou } from "../src/iou.js";
+import { iouId, signIou } from "../src/iou.js";
 import { net } from "../src/netting.js";
 import {
   buildProposal,
@@ -30,7 +30,12 @@ const ADDRS: Address[] = Array.from(
   (_, i) => `0x${(i + 1).toString(16).padStart(40, "0")}` as Address,
 );
 
-/** Test IOUs don't need real signatures — the engine keys on `id`. */
+/**
+ * Test IOUs don't need real signatures — the engine keys on `id`. The id is
+ * the REAL derived one (CR-01: rebuildProposal/verifyProposal re-derive from
+ * (hub, iou) and ignore whatever a caller put in `.id`), so these fixtures
+ * stay id-consistent with the manifests the engine now produces.
+ */
 function fakeIou(
   debtor: Address,
   creditor: Address,
@@ -38,14 +43,9 @@ function fakeIou(
   nonce: bigint,
   expiry: bigint = FUTURE,
 ): SignedIou {
-  const id = keccak256(
-    toHex(`${debtor}|${creditor}|${amount}|${nonce}|${expiry}`),
-  ) as Hex;
-  return {
-    iou: { debtor, creditor, amount, nonce, expiry, ref: id },
-    signature: "0x",
-    id,
-  };
+  const ref = keccak256(toHex(`${debtor}|${creditor}|${amount}|${nonce}|${expiry}`)) as Hex;
+  const iou: Iou = { debtor, creditor, amount, nonce, expiry, ref };
+  return { iou, signature: "0x", id: iouId(HUB, iou) };
 }
 
 const arbIou = fc
@@ -248,7 +248,7 @@ describe("verifyProposal with excluded set", () => {
 
   it("consent signatures bind to the rebuilt digest, never replay from pass 1", async () => {
     const ious = await threeMemberEconomy();
-    const pass1 = buildProposal(HUB, 0n, net(ious, { now: NOW }));
+    const pass1 = buildProposal(HUB, 0n, net(ious, { now: NOW, hub: HUB }));
     const { proposal: rebuilt } = rebuildProposal(HUB, 0n, ious, [carol.address], {
       now: NOW,
     });
@@ -265,7 +265,7 @@ describe("verifyProposal with excluded set", () => {
 
   it("omitted excluded opt keeps pass-1 semantics for existing callers", async () => {
     const ious = await threeMemberEconomy();
-    const pass1 = buildProposal(HUB, 0n, net(ious, { now: NOW }));
+    const pass1 = buildProposal(HUB, 0n, net(ious, { now: NOW, hub: HUB }));
     for (const account of [alice, bob, carol]) {
       const check = verifyProposal(HUB, pass1, ious, account.address, { now: NOW });
       expect(check.ok).toBe(true);
@@ -274,7 +274,7 @@ describe("verifyProposal with excluded set", () => {
 
   it("WR-06: refuses a proposal whose roundNonce disagrees with the local chain view", async () => {
     const ious = await threeMemberEconomy();
-    const proposal = buildProposal(HUB, 1n, net(ious, { now: NOW }));
+    const proposal = buildProposal(HUB, 1n, net(ious, { now: NOW, hub: HUB }));
     const check = verifyProposal(HUB, proposal, ious, alice.address, {
       now: NOW,
       expectedRoundNonce: 0n,
@@ -289,7 +289,7 @@ describe("verifyProposal with excluded set", () => {
 
   it("WR-06: refuses when consumedIds overlap an outstanding unconfirmed consent", async () => {
     const ious = await threeMemberEconomy();
-    const proposal = buildProposal(HUB, 0n, net(ious, { now: NOW }));
+    const proposal = buildProposal(HUB, 0n, net(ious, { now: NOW, hub: HUB }));
     const check = verifyProposal(HUB, proposal, ious, alice.address, {
       now: NOW,
       pendingConsumedIds: new Set<Hex>([proposal.consumedIds[0]]),

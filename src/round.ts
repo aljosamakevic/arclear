@@ -6,6 +6,7 @@ import {
 } from "viem";
 import type { Account } from "viem/accounts";
 import { domain, ROUND_TYPES } from "./domain.js";
+import { iouId } from "./iou.js";
 import { merkleRoot } from "./merkle.js";
 import { net } from "./netting.js";
 import type { NetResult, RoundProposal, SignedIou } from "./types.js";
@@ -96,7 +97,9 @@ export function rebuildProposal(
     chainId?: number;
   },
 ): { proposal: RoundProposal; result: NetResult } {
-  const result = net(filterExcluded(openIous, excluded), opts);
+  // CR-01: the hub is bound here, so ids are derived — a coordinator can never
+  // rebuild a manifest around an id the debtor did not actually produce.
+  const result = net(filterExcluded(openIous, excluded), { ...opts, hub });
   return { proposal: buildProposal(hub, roundNonce, result, opts.chainId), result };
 }
 
@@ -115,8 +118,44 @@ export function rebuildProposal(
  * consents: pass `opts.expectedRoundNonce` (the hub's live `roundNonce` as
  * *you* read it) and `opts.pendingConsumedIds` (the union of consumedIds
  * across your unconfirmed consents) to refuse such proposals as data.
+ *
+ * CR-01 — the local recomputation derives every id from (hub, iou); the
+ * proposal's own ids are only ever compared against, never adopted. Every id
+ * of OURS that our recomputation consumed must be present in the manifest.
+ *
+ * CR-04 — total: any malformed proposal (bad consumedIds, out-of-range deltas,
+ * non-address participants) is a refusal with a reason, never a throw.
  */
 export function verifyProposal(
+  hub: Address,
+  proposal: RoundProposal,
+  myIous: SignedIou[],
+  self: Address,
+  opts: {
+    now: bigint;
+    safetyWindowSeconds?: bigint;
+    settledIds?: ReadonlySet<Hex>;
+    redeemedIds?: ReadonlySet<Hex>;
+    excluded?: Address[];
+    chainId?: number;
+    expectedRoundNonce?: bigint;
+    pendingConsumedIds?: ReadonlySet<Hex>;
+  },
+): { ok: boolean; reason?: string } {
+  // CR-04 totality: this is a verification function — its contract is
+  // `{ ok, reason }`, never a throw (CLAUDE.md). Every input below is
+  // coordinator-supplied, and several of the primitives it feeds (merkleRoot's
+  // strictly-ascending/bytes32 precondition, viem's int256 range check inside
+  // roundDigest) are documented to throw on malformed data. An integrator's
+  // auto-consent daemon must get a refusal for that, not a crash.
+  try {
+    return verifyProposalOrThrow(hub, proposal, myIous, self, opts);
+  } catch (e) {
+    return { ok: false, reason: `malformed proposal: ${e instanceof Error ? e.message : e}` };
+  }
+}
+
+function verifyProposalOrThrow(
   hub: Address,
   proposal: RoundProposal,
   myIous: SignedIou[],
@@ -170,7 +209,10 @@ export function verifyProposal(
   const idx = proposal.participants.findIndex((a) => a.toLowerCase() === selfLc);
   if (idx === -1) return { ok: false, reason: "self not in participant set" };
 
-  const recomputed = net(filterExcluded(myIous, excluded), opts);
+  // CR-01: `hub` binds the recomputation, so every id below is DERIVED from
+  // the IOU we hold — the coordinator's `SignedIou.id` never enters our view.
+  const mine = filterExcluded(myIous, excluded);
+  const recomputed = net(mine, { ...opts, hub });
   const myIdx = recomputed.participants.findIndex((a) => a.toLowerCase() === selfLc);
   const myDelta = myIdx === -1 ? 0n : recomputed.deltas[myIdx];
   if (proposal.deltas[idx] !== myDelta) {
@@ -183,6 +225,24 @@ export function verifyProposal(
   // No stranger-id check (IN-01): consumed ids we haven't seen locally are
   // fine as long as they don't involve us — we can't tell from ids alone, but
   // our delta already pins the sum of everything that involves us.
+  //
+  // CR-01 (omission variant): the converse is NOT covered by the delta check.
+  // Our delta pins only the SUM of our flows, so a coordinator can drop a pair
+  // of our IOUs that cancel — or swap one of ours for a forged id — and still
+  // present the delta we expect. Anything of OURS that our own recomputation
+  // consumed must therefore appear in the manifest we are about to sign, or
+  // that paper stays live while we consent to a round claiming to consume it.
+  const proposed = new Set<string>();
+  for (const id of proposal.consumedIds) proposed.add(id.toLowerCase());
+  const inRound = new Set<string>(recomputed.consumedIds);
+  for (const s of mine) {
+    if (s.iou.debtor.toLowerCase() !== selfLc && s.iou.creditor.toLowerCase() !== selfLc) continue;
+    const id = iouId(hub, s.iou, opts.chainId).toLowerCase();
+    if (!inRound.has(id)) continue; // expired/settled/redeemed locally too
+    if (!proposed.has(id)) {
+      return { ok: false, reason: `my consumed id ${id} is missing from the proposal manifest` };
+    }
+  }
 
   if (manifestHash(proposal.consumedIds) !== proposal.manifestHash) {
     return { ok: false, reason: "manifestHash does not match consumedIds" };

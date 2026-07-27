@@ -69,7 +69,7 @@ describe("EIP-712 sign/verify", () => {
     const b = await signIou(HUB, iou(bob.address, alice.address, 30n, 1n), bob, undefined, {
       now: NOW,
     });
-    const result = net([a, b], { now: NOW });
+    const result = net([a, b], { now: NOW, hub: HUB });
     const proposal = buildProposal(HUB, 0n, result);
 
     // both parties verify against their own view before consenting
@@ -90,7 +90,7 @@ describe("EIP-712 sign/verify", () => {
     const a = await signIou(HUB, iou(alice.address, bob.address, 100n), alice, undefined, {
       now: NOW,
     });
-    const result = net([a], { now: NOW });
+    const result = net([a], { now: NOW, hub: HUB });
     const proposal = buildProposal(HUB, 0n, result);
     const tampered = {
       ...proposal,
@@ -125,9 +125,9 @@ describe("EIP-712 sign/verify", () => {
     const b = await signIou(HUB, iou(bob.address, alice.address, 30n, 1n), bob, undefined, {
       now: NOW,
     });
-    const filtered = net([a, b], { now: NOW, redeemedIds: new Set([a.id]) });
+    const filtered = net([a, b], { now: NOW, hub: HUB, redeemedIds: new Set([a.id]) });
     expect(filtered.consumedIds).toEqual([b.id.toLowerCase()]);
-    const unfiltered = net([a, b], { now: NOW });
+    const unfiltered = net([a, b], { now: NOW, hub: HUB });
     expect(unfiltered.consumedIds).toHaveLength(2);
   });
 
