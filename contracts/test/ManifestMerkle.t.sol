@@ -362,6 +362,25 @@ contract ManifestMerkleTest is Test {
             ManifestMerkle.verifyNonInclusion(bytes32(uint256(one[0]) - 1), q, root1),
             "single-leaf tree BelowFirst must verify"
         );
+
+        // D-CR-04: a non-first leaf offered as "first" must fail the index gate.
+        // The mirror of this case on the AboveLast branch existed; this one did
+        // not, so `&& p.a.index == 0` was deletable with the whole suite green —
+        // and without it the prover picks any anchor and forges non-inclusion
+        // for every MEMBER below it, which redeemIOU pays out on.
+        ManifestMerkle.NonInclusionProof memory forged = ManifestMerkle.NonInclusionProof({
+            kind: ManifestMerkle.NonInclusionKind.BelowFirst,
+            a: _inclusionProof(ids, 3), // anchor leaf 3, not leaf 0
+            b: _emptyProof()
+        });
+        assertTrue(
+            ManifestMerkle.verifyInclusion(forged.a, root),
+            "test-internal: the forged anchor must be an honest inclusion proof"
+        );
+        assertFalse(
+            ManifestMerkle.verifyNonInclusion(ids[1], forged, root),
+            "member id proved non-inclusion via BelowFirst anchored on a non-first leaf"
+        );
     }
 
     function test_verifyNonInclusion_aboveLast() public pure {
@@ -511,6 +530,47 @@ contract ManifestMerkleTest is Test {
         assertFalse(
             ManifestMerkle.verifyNonInclusion(mid, q, root),
             "bracket with unequal leafCounts must be rejected"
+        );
+    }
+
+    /// D-CR-04: the boundary anchors are the BelowFirst/AboveLast twins of the
+    /// bracket adjacency lie above. A prover chooses `kind` and the anchor
+    /// freely inside redeemIOU, so an honest inclusion proof for ANY interior
+    /// leaf, relabelled as the first (or last) leaf, would otherwise prove
+    /// non-inclusion for every member below (or above) it.
+    function testFuzz_boundaryAnchorLie_rejected(uint256 seed, uint256 pick) public pure {
+        uint256 n = bound(seed, 3, 32);
+        bytes32[] memory ids = _sortedIds(n, seed);
+        bytes32 root = ManifestMerkle.rootOf(ids);
+
+        uint256 m = bound(pick, 1, n - 2); // strictly interior anchor
+        ManifestMerkle.InclusionProof memory anchor = _inclusionProof(ids, m);
+        assertTrue(
+            ManifestMerkle.verifyInclusion(anchor, root),
+            "test-internal: the anchor must be an honest inclusion proof"
+        );
+
+        // Only the index-0 gate stands between ids[m-1] (a member, strictly
+        // below the anchor) and a forged absence claim.
+        ManifestMerkle.NonInclusionProof memory below = ManifestMerkle.NonInclusionProof({
+            kind: ManifestMerkle.NonInclusionKind.BelowFirst,
+            a: anchor,
+            b: _emptyProof()
+        });
+        assertFalse(
+            ManifestMerkle.verifyNonInclusion(ids[m - 1], below, root),
+            "BelowFirst anchored on an interior leaf must be rejected"
+        );
+
+        // Symmetric: only the last-index gate stops ids[m+1].
+        ManifestMerkle.NonInclusionProof memory above = ManifestMerkle.NonInclusionProof({
+            kind: ManifestMerkle.NonInclusionKind.AboveLast,
+            a: anchor,
+            b: _emptyProof()
+        });
+        assertFalse(
+            ManifestMerkle.verifyNonInclusion(ids[m + 1], above, root),
+            "AboveLast anchored on an interior leaf must be rejected"
         );
     }
 
