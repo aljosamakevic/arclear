@@ -21,6 +21,7 @@ const NOW = 1_800_000_000n;
 
 const alice = privateKeyToAccount(("0x" + "11".repeat(32)) as Hex);
 const bob = privateKeyToAccount(("0x" + "22".repeat(32)) as Hex);
+const carol = privateKeyToAccount(("0x" + "33".repeat(32)) as Hex);
 
 function iou(debtor: Address, creditor: Address, amount: bigint, nonce = 1n): Iou {
   return {
@@ -98,7 +99,70 @@ describe("EIP-712 sign/verify", () => {
     };
     const check = verifyProposal(HUB, tampered, [a], alice.address, { now: NOW });
     expect(check.ok).toBe(false);
-    expect(check.reason).toMatch(/delta mismatch|digest/);
+    // Anchored, not an OR-regex: `/delta mismatch|digest/` could never fail on
+    // the digest path, so it silently asserted nothing about which branch fired.
+    expect(check.reason).toMatch(/^delta mismatch/);
+  });
+
+  /**
+   * D-CR-05: three of verifyProposal's five refusal branches had no test, so
+   * each could be deleted with the whole suite green. They are the participant's
+   * last line of defense against a coordinator that shows one thing and commits
+   * to another — signConsent takes `manifestHash` verbatim from the proposal
+   * object, and ClearingHubV2.executeRound derives the root from the SUBMITTED
+   * consumedIds, so an unbound manifest field means a signature given for list
+   * L1 settles list L2.
+   */
+  it("refuses a proposal whose manifestHash does not commit to the shown consumedIds", async () => {
+    const a = await signIou(HUB, iou(alice.address, bob.address, 100n), alice, undefined, {
+      now: NOW,
+    });
+    const b = await signIou(HUB, iou(bob.address, alice.address, 30n, 1n), bob, undefined, {
+      now: NOW,
+    });
+    const proposal = buildProposal(HUB, 0n, net([a, b], { now: NOW, hub: HUB }));
+
+    // The coordinator shows the honest ids (so the delta and id-presence checks
+    // pass) but commits to a different manifest, then recomputes the digest so
+    // ONLY the manifest binding can fire.
+    const swapped = { ...proposal, manifestHash: manifestHash([("0x" + "cd".repeat(32)) as Hex]) };
+    const forged = { ...swapped, digest: roundDigest(HUB, swapped) };
+
+    const check = verifyProposal(HUB, forged, [a, b], alice.address, { now: NOW });
+    expect(check.ok).toBe(false);
+    expect(check.reason).toBe("manifestHash does not match consumedIds");
+  });
+
+  it("refuses a proposal whose digest field does not match its contents", async () => {
+    const a = await signIou(HUB, iou(alice.address, bob.address, 100n), alice, undefined, {
+      now: NOW,
+    });
+    const proposal = buildProposal(HUB, 0n, net([a], { now: NOW, hub: HUB }));
+    const check = verifyProposal(
+      HUB,
+      { ...proposal, digest: ("0x" + "ff".repeat(32)) as Hex },
+      [a],
+      alice.address,
+      { now: NOW },
+    );
+    expect(check.ok).toBe(false);
+    expect(check.reason).toBe("digest does not match proposal contents");
+  });
+
+  it("refuses a proposal that omits self from the participant set", async () => {
+    // A round strictly between bob and carol: alice has no position in it, so
+    // consenting would sign a full-position digest she is not a party to.
+    const other = await signIou(HUB, iou(bob.address, carol.address, 25n, 7n), bob, undefined, {
+      now: NOW,
+    });
+    const proposal = buildProposal(HUB, 0n, net([other], { now: NOW, hub: HUB }));
+    expect(
+      proposal.participants.map((p) => p.toLowerCase()),
+    ).not.toContain(alice.address.toLowerCase());
+
+    const check = verifyProposal(HUB, proposal, [], alice.address, { now: NOW });
+    expect(check.ok).toBe(false);
+    expect(check.reason).toBe("self not in participant set");
   });
 
   it("L-convention D-15: refuses expiry > now + L, signs the <= boundary", async () => {

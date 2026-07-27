@@ -424,3 +424,115 @@ describe("property 7: node-as-leaf second preimage (prefix domain separation)", 
     }
   });
 });
+
+/**
+ * D-CR-03. Property 4 above only ever anchors belowFirst/aboveLast on the TRUE
+ * first/last leaf and brackets on strictly adjacent pairs, so it never offers a
+ * non-boundary leaf as the anchor — which is exactly what the anchor gates in
+ * verifyNonInclusion exist to refuse. Each case below isolates ONE guard: every
+ * other check in its branch passes, so deleting that single line turns the case
+ * into "a manifest MEMBER proved its own non-inclusion" — the claim redeemIOU
+ * consumes to decide an IOU was never netted. The Solidity twin covers the
+ * aboveLast direction (ManifestMerkle.t.sol) and fuzzes bracket adjacency; this
+ * is the TS mirror plus the belowFirst direction neither side had.
+ */
+describe("property 8: anchor binding (non-inclusion soundness)", () => {
+  it("rejects belowFirst anchored on a non-first leaf (index-0 gate)", () => {
+    fc.assert(
+      fc.property(
+        fc.record({
+          n: fc.integer({ min: 3, max: 64 }),
+          salt: fc.nat(),
+          pick: fc.nat(),
+        }),
+        ({ n, salt, pick }) => {
+          const ids = makeIds(n, salt);
+          const root = merkleRoot(ids);
+          const m = 1 + (pick % (n - 2)); // strictly interior anchor
+          const anchor = inclusionProof(ids, m);
+          // Anchor inclusion is honest and target < anchor.leaf holds, so the
+          // index-0 gate is the ONLY thing refusing a member id here.
+          const check = verifyNonInclusion(
+            ids[m - 1],
+            { kind: "belowFirst", a: anchor, b: { ...anchor } },
+            root,
+          );
+          expect(check.ok).toBe(false);
+          expect(check.reason).toMatch(/belowFirst anchor must sit at index 0/);
+        },
+      ),
+    );
+  });
+
+  it("rejects aboveLast anchored on a non-last leaf (last-index gate)", () => {
+    fc.assert(
+      fc.property(
+        fc.record({
+          n: fc.integer({ min: 3, max: 64 }),
+          salt: fc.nat(),
+          pick: fc.nat(),
+        }),
+        ({ n, salt, pick }) => {
+          const ids = makeIds(n, salt);
+          const root = merkleRoot(ids);
+          const m = pick % (n - 1); // strictly non-last anchor
+          const anchor = inclusionProof(ids, m);
+          const check = verifyNonInclusion(
+            ids[m + 1],
+            { kind: "aboveLast", a: anchor, b: { ...anchor } },
+            root,
+          );
+          expect(check.ok).toBe(false);
+          expect(check.reason).toMatch(/aboveLast anchor must sit at index/);
+        },
+      ),
+    );
+  });
+
+  it("rejects a non-adjacent bracket that straddles a member (adjacency gate)", () => {
+    fc.assert(
+      fc.property(
+        fc.record({
+          n: fc.integer({ min: 3, max: 64 }),
+          salt: fc.nat(),
+          pick: fc.nat(),
+        }),
+        ({ n, salt, pick }) => {
+          const ids = makeIds(n, salt);
+          const root = merkleRoot(ids);
+          const i = pick % (n - 2);
+          // Both neighbor proofs are honest and same-leafCount, and the skipped
+          // member falls strictly between them: only adjacency refuses.
+          const check = verifyNonInclusion(
+            ids[i + 1],
+            { kind: "bracket", a: inclusionProof(ids, i), b: inclusionProof(ids, i + 2) },
+            root,
+          );
+          expect(check.ok).toBe(false);
+          expect(check.reason).toMatch(/bracket neighbors not adjacent/);
+        },
+      ),
+    );
+  });
+
+  it("rejects a proof carrying an unconsumed extra sibling (Solidity parity)", () => {
+    // ManifestMerkle.sol enforces `s == p.siblings.length`; the TS twin's copy
+    // was untested, and a divergence here means the SDK tells a creditor their
+    // redemption proof is valid while the on-chain call reverts.
+    for (const n of [2, 3, 5, 8]) {
+      const ids = makeIds(n, 900 + n);
+      const root = merkleRoot(ids);
+      for (let i = 0; i < n; i++) {
+        const p = inclusionProof(ids, i);
+        expect(verifyInclusion(p, root)).toEqual({ ok: true });
+        const padded = {
+          ...p,
+          siblings: [...p.siblings, keccak256(toHex(`unconsumed|${n}|${i}`))],
+        };
+        const check = verifyInclusion(padded, root);
+        expect(check.ok).toBe(false);
+        expect(check.reason).toMatch(/unconsumed siblings/);
+      }
+    }
+  });
+});

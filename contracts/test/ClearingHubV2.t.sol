@@ -83,6 +83,143 @@ contract ClearingHubV2Test is RoundBuilderV2 {
         hub.executeRound(nonce_, p, d, ids, new bytes[](2));
     }
 
+    // ------------------------------------------ V2 round-path revert matrix
+    //
+    // D-CR-01: every guard asserted below was deletable with the whole Foundry
+    // suite green. The revert matrix the README advertises lives in
+    // ClearingHub.t.sol and covers v1 — a different source file — while this
+    // file previously asserted exactly one v1-inherited error (ZeroAmount, and
+    // only on the redeemIOU path). ClearingHubV2 is the contract actually
+    // deployed, so these are the guards that matter.
+
+    /// The load-bearing one. `src/round.ts`'s verifyProposal deliberately checks
+    /// only the CALLER's own delta and documents that it performs no
+    /// cross-participant check, so a legitimate participant can inflate their
+    /// own delta, leave every other delta correct, and every honest member's
+    /// local recomputation still passes and signs. This on-chain check is the
+    /// SOLE defense against collateral minting: without it the hub's claims
+    /// exceed the tokens it actually holds while no token ever moves.
+    function test_revert_executeRound_deltasDoNotSumToZero_V2() public {
+        _fundAndDeposit(actors[0], 10e6);
+        address[] memory p = new address[](2);
+        (p[0], p[1]) = (actors[0], actors[1]);
+        int256[] memory d = new int256[](2);
+        (d[0], d[1]) = (int256(-1e6), int256(9e6)); // sum = +8e6
+        bytes32[] memory ids = _manifest(2, "nonzero-sum");
+        bytes[] memory sigs = _buildSignatures(0, p, d, ids);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(ClearingHubV2.DeltasDoNotSumToZero.selector, int256(8e6))
+        );
+        hub.executeRound(0, p, d, ids, sigs);
+
+        assertEq(hub.roundNonce(), 0, "nonce must not advance");
+        assertEq(
+            hub.collateral(actors[0]) + hub.collateral(actors[1]),
+            usdc.balanceOf(address(hub)),
+            "collateral claims must never exceed the hub's token balance"
+        );
+    }
+
+    /// With TooFewParticipants gone, `participants.length == 0` skips the
+    /// signature loop entirely, so anyone could advance `roundNonce` with an
+    /// unsigned empty round — flushing the RING-slot rootRing and permanently
+    /// breaking redeemIOU's coverage window for every outstanding IOU. Both
+    /// sides of the `< 2` boundary are asserted so a `< 1` weakening also fails.
+    function test_revert_executeRound_tooFewParticipants_V2() public {
+        vm.expectRevert(ClearingHubV2.TooFewParticipants.selector);
+        hub.executeRound(0, new address[](0), new int256[](0), new bytes32[](0), new bytes[](0));
+
+        address[] memory one = new address[](1);
+        one[0] = actors[0];
+        vm.expectRevert(ClearingHubV2.TooFewParticipants.selector);
+        hub.executeRound(0, one, new int256[](1), new bytes32[](0), new bytes[](1));
+
+        assertEq(hub.roundNonce(), 0, "an unsigned round must never advance the nonce");
+    }
+
+    /// Canonical participant order is what makes "one signature per member"
+    /// mean what it says: a duplicate would let one member's single consent
+    /// stand in for two slots. Signatures here are VALID for index 0, so
+    /// BadSignature(0) cannot mask the ordering gate.
+    function test_revert_executeRound_participantsNotStrictlyAscending_V2() public {
+        int256[] memory d = new int256[](2);
+        bytes32[] memory ids = _manifest(2, "ordering");
+
+        address[] memory dup = new address[](2);
+        (dup[0], dup[1]) = (actors[1], actors[1]);
+        // Signatures are assembled BEFORE expectRevert: _buildSignatures reads
+        // hub.hashRound, and that external call would otherwise consume the cheat.
+        bytes[] memory dupSigs = _buildSignatures(0, dup, d, ids);
+        vm.expectRevert(ClearingHubV2.ParticipantsNotStrictlyAscending.selector);
+        hub.executeRound(0, dup, d, ids, dupSigs);
+
+        address[] memory desc = new address[](2);
+        (desc[0], desc[1]) = (actors[1], actors[0]);
+        bytes[] memory descSigs = _buildSignatures(0, desc, d, ids);
+        vm.expectRevert(ClearingHubV2.ParticipantsNotStrictlyAscending.selector);
+        hub.executeRound(0, desc, d, ids, descSigs);
+
+        assertEq(hub.roundNonce(), 0, "nonce must not advance");
+    }
+
+    /// Lower severity — 0.8.x bounds checks already revert on the ragged
+    /// arrays — but the explicit error is what an integrator debugs against,
+    /// and it is the only check that covers BOTH trailing arrays.
+    function test_revert_executeRound_lengthMismatch_V2() public {
+        address[] memory p = new address[](2);
+        (p[0], p[1]) = (actors[0], actors[1]);
+        bytes32[] memory ids = _manifest(2, "length-mismatch");
+
+        vm.expectRevert(ClearingHubV2.LengthMismatch.selector);
+        hub.executeRound(0, p, new int256[](1), ids, new bytes[](2)); // deltas short
+
+        vm.expectRevert(ClearingHubV2.LengthMismatch.selector);
+        hub.executeRound(0, p, new int256[](2), ids, new bytes[](1)); // signatures short
+
+        assertEq(hub.roundNonce(), 0, "nonce must not advance");
+    }
+
+    // ------------------------------------------- deposit/withdraw/constructor
+
+    function test_revert_deposit_zeroAmount_V2() public {
+        vm.prank(actors[0]);
+        vm.expectRevert(ClearingHubV2.ZeroAmount.selector);
+        hub.deposit(0);
+        assertEq(hub.collateral(actors[0]), 0, "no phantom deposit");
+    }
+
+    function test_revert_withdraw_overBalance_V2() public {
+        _fundAndDeposit(actors[0], 10e6);
+
+        vm.prank(actors[0]);
+        vm.expectRevert(ClearingHubV2.InsufficientWithdrawBalance.selector);
+        hub.withdraw(10e6 + 1);
+
+        vm.prank(actors[0]);
+        vm.expectRevert(ClearingHubV2.ZeroAmount.selector);
+        hub.withdraw(0);
+
+        assertEq(hub.collateral(actors[0]), 10e6, "balance untouched by refused exits");
+        assertEq(usdc.balanceOf(actors[0]), 0, "no tokens left the hub");
+    }
+
+    /// K/RING/MAX_IOU_LIFETIME are immutable, so a bad deploy is unfixable:
+    /// RING == 0 makes `rootRing[nonce_ % RING]` a division-by-zero panic on
+    /// the very first round (bricking the hub), K == 0 makes every debtor
+    /// instantly redeemable-against, and L == 0 makes the coverage window
+    /// unsatisfiable. Each argument is asserted independently.
+    function test_revert_constructor_badConfig() public {
+        vm.expectRevert(ClearingHubV2.BadConfig.selector);
+        new ClearingHubV2(usdc, 0, RING, L);
+
+        vm.expectRevert(ClearingHubV2.BadConfig.selector);
+        new ClearingHubV2(usdc, K, 0, L);
+
+        vm.expectRevert(ClearingHubV2.BadConfig.selector);
+        new ClearingHubV2(usdc, K, RING, 0);
+    }
+
     // ------------------------------------------------- redeemIOU happy path
 
     function test_redeemIOU_debitsStaleDebtor() public {
