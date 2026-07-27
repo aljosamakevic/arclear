@@ -612,11 +612,22 @@ cold — the worst case client gas limits must cover, not warm steady-state:
 | `executePvP` | two legs, n = 3+3, m = 10+10, union 4 | 563,814 |
 | `executePvP` | two legs, n = 5+5, m = 105+105 (demo scale), union 5 | 1,734,897 |
 
-Marginal cost ≈ 3,885 gas per consumed id (mildly superlinear from memory
-expansion). The SDK sets explicit size-parameterized limits with ≥ 1.5×
-margin (`gas = 300,000 + 40,000·n + 6,000·m`; `redeemIOU` flat 500,000;
+Marginal cost ≈ 4,400 gas per consumed id and ≈ 54,400 per participant,
+measured intrinsic-inclusive across n ∈ {2, 5, 15, 30, 50} in
+`contracts/test/GasScaling.t.sol`. **The figures in the table above are
+`gasleft()` deltas, which exclude intrinsic gas** (21,000 + 16 per non-zero
+calldata byte — at n = 30 that omission is ≈ 90,000 gas), so they understate
+what a transaction actually needs; the client formulas are fitted against the
+intrinsic-inclusive measurements. The SDK sets explicit size-parameterized
+limits (`gas = 300,000 + 90,000·n + 8,000·m`; `redeemIOU` flat 500,000;
 `executePvP` composes the leg formula twice plus a measured router term:
-`350,000 + 2·300,000 + 40,000·(n₁+n₂) + 6,000·(m₁+m₂) + 15,000·n_union`) —
+`350,000 + 2·300,000 + 90,000·(n₁+n₂) + 8,000·(m₁+m₂) + 15,000·n_union`),
+giving 1.72×–2.61× margin for `executeRound` and 1.74×–2.77× for `executePvP`
+across the measured range; `GasScaling.t.sol` asserts the shipped formula
+covers every measured point, so the coefficients cannot silently drift again.
+The earlier 40,000·n / 6,000·m coefficients were extrapolated from n = 5 only
+and under-provisioned from n ≈ 16 upward. `redeemIOU`'s flat 500,000 is
+intrinsic-blind (≈ 1.35× at demo scale) and is due a re-measurement —
 explicit gas is mandatory on Arc, where estimation reserves the whole USDC
 balance. Snapshot persisted in `contracts/.gas-snapshot` (snapshot lines
 record full-test gas including setup; the table above records the call-only

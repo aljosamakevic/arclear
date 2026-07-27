@@ -173,9 +173,15 @@ settlement.
 `net()` is a pure, deterministic function — anyone can run it and get
 byte-identical output ([spec](PROTOCOL.md#netting-determinism-spec)):
 
+`net()` never trusts a caller-supplied `SignedIou.id`: you must either let it
+re-derive each id from the signed struct (`{ hub }`, the safe default for
+anything that will settle) or explicitly opt out. Trusting an attacker-supplied
+id would let a coordinator commit a fake id to the manifest while the real IOU
+stays redeemable — the debtor would pay twice.
+
 ```ts
 const ious = [signedByAlice, signedByBob];
-const result = net(ious, { now });
+const result = net(ious, { now, hub: HUB_USDC });
 // result.participants: strictly ascending addresses
 // result.deltas: index-aligned, sums to exactly 0n; negative = net debtor
 // Here: Alice -500_000n, Bob +500_000n — the 0.75 reciprocal portion cancelled.
