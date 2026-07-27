@@ -21,14 +21,26 @@ import {ClearingHubV3} from "../src/ClearingHubV3.sol";
 ///            (plus another for `lastRound`), so the measured shape is one
 ///            funded debtor and n-1 fresh creditors, on a fresh hub at nonce 0.
 ///
-/// @dev    The constants below are the FITTED V3 formula, pinned by assertLe at
+/// @dev    The per-entry coefficient is where V3 diverges sharply from V2, and
+///         the divergence is deliberate. Each `ConsumedRef` now costs a COLD
+///         SSTORE into the permanent `consumed` ledger (20,000 + 2,100) on top
+///         of the merkle work V2 already did, taking the marginal entry from
+///         ~4,400 gas to ~30,000. That is the price of closing CR-02: V2's
+///         cheaper round bought a redemption guarantee that any third party
+///         could permanently destroy. The counterpart saving is on the other
+///         side of the product — `redeemIOU` drops from 199,604 gas (a
+///         16-proof ring walk) to ~60,600, and is now INDEPENDENT of history
+///         depth, which `test_gas_v3_redeemIOU_isHistoryIndependent` pins.
+///
+///         The constants below are the FITTED V3 formula, pinned by assertLe at
 ///         every point. They are intentionally the same shape as the V2
 ///         constants in src/client.ts so Wave B can swap them in directly.
 contract GasScalingV3Test is RoundBuilderV3 {
     // --- fitted V3 write-gas formula (Wave B: mirror into src/client.ts) ---
     uint256 internal constant EXECUTE_ROUND_GAS_BASE = 300_000;
     uint256 internal constant EXECUTE_ROUND_GAS_PER_PARTICIPANT = 90_000;
-    uint256 internal constant EXECUTE_ROUND_GAS_PER_ID = 14_000;
+    uint256 internal constant EXECUTE_ROUND_GAS_PER_ID = 45_000;
+    uint256 internal constant REDEEM_IOU_GAS = 150_000;
 
     function setUp() public {
         _setUpActors();
@@ -39,7 +51,7 @@ contract GasScalingV3Test is RoundBuilderV3 {
     /// @dev Fresh hub at nonce 0 plus `n` known-key actors, ascending, so every
     ///      point measures all-cold storage.
     function _freshHub(uint256 n) internal {
-        hub = new ClearingHubV3(usdc, K, RING, L);
+        hub = new ClearingHubV3(usdc, K);
         delete keys;
         delete actors;
         uint256[] memory ks = new uint256[](n);
@@ -192,5 +204,49 @@ contract GasScalingV3Test is RoundBuilderV3 {
             );
         }
         console2.log("  overall m=1..250 per entry:", (totals[3] - totals[0]) / (ms[3] - ms[0]));
+    }
+
+    // -------------------------------------------------------------- redeemIOU
+
+    /// @dev Stale a fresh debtor over `rounds` executed rounds, then measure the
+    ///      redemption a creditor actually pays for, intrinsic included.
+    function _measureRedeem(uint256 rounds) internal returns (uint256 total, uint256 exec) {
+        _freshHub(ACTORS);
+        _fundAndDeposit(actors[0], 10e6);
+        ClearingHubV3.Iou memory iou = _makeIou(actors[0], actors[1], 5e6, 1);
+        bytes memory sig = _signIou(keys[0], iou);
+        for (uint256 r; r < rounds; ++r) {
+            _executeRoundWithout(actors[0], 8);
+        }
+
+        uint256 intrinsic = _intrinsicGas(abi.encodeCall(ClearingHubV3.redeemIOU, (iou, sig)));
+        uint256 g0 = gasleft();
+        hub.redeemIOU(iou, sig);
+        exec = g0 - gasleft();
+        assertEq(hub.collateral(actors[1]), 5e6, "redemption must have settled");
+
+        total = exec + intrinsic;
+        console2.log("V3 redeemIOU after rounds:", rounds);
+        console2.log("  exec / intrinsic:", exec, intrinsic);
+        console2.log("  total / formula :", total, REDEEM_IOU_GAS);
+        assertLe(total, REDEEM_IOU_GAS, "fitted V3 redeemIOU budget under-provisions this point");
+    }
+
+    /// The property the root ring could never offer: redemption cost does not
+    /// depend on how much history the hub has accumulated. V2's counterpart
+    /// walked RING=16 non-inclusion proofs for 199,604 gas and would have grown
+    /// linearly with any larger ring.
+    function test_gas_v3_redeemIOU_isHistoryIndependent() public {
+        (uint256 shallowTotal, uint256 shallowExec) = _measureRedeem(4);
+        (uint256 deepTotal, uint256 deepExec) = _measureRedeem(64);
+        // Execution gas is exactly equal: the redemption path touches no
+        // per-round state at all. The totals differ by a handful of gas only
+        // because each point deploys a fresh hub, so the EIP-712 domain
+        // separator — and therefore the signature's zero-byte count, and
+        // therefore EIP-2028 intrinsic gas — differs. That jitter is an artifact
+        // of the measurement, not of history depth.
+        assertEq(deepExec, shallowExec, "redeemIOU must be O(1) in history depth");
+        assertApproxEqAbs(deepTotal, shallowTotal, 64, "intrinsic jitter beyond signature entropy");
+        console2.log("V3 redeemIOU execution is history-independent at:", deepExec);
     }
 }
