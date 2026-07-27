@@ -13,7 +13,12 @@ import { arcTestnet, MIN_MAX_FEE_PER_GAS } from "./domain.js";
 import { clearingHubAbi } from "./abi/ClearingHub.js";
 import { clearingHubV2Abi } from "./abi/ClearingHubV2.js";
 import { pvpRouterAbi } from "./abi/PvPRouter.js";
-import { nonInclusionProof, type InclusionProof, type NonInclusionProof } from "./merkle.js";
+import {
+  merkleRoot,
+  nonInclusionProof,
+  type InclusionProof,
+  type NonInclusionProof,
+} from "./merkle.js";
 import { unionParticipants } from "./pvp.js";
 import type { Iou, PvPProposal, RoundProposal } from "./types.js";
 
@@ -80,6 +85,19 @@ export function scanWindows(from: bigint, to: bigint, span: bigint): [bigint, bi
 
 export function walletClient(account: Account, rpcUrl?: string): WalletClient {
   return createWalletClient({ account, chain: arcTestnet, transport: http(rpcUrl) });
+}
+
+/**
+ * Does this id list hash to the root the chain committed to? Total: a list the
+ * merkle builder refuses (unsorted, duplicated) is simply not a match, never a
+ * throw — the caller is choosing between candidates, not validating input.
+ */
+function rootMatches(ids: Hex[], root: Hex): boolean {
+  try {
+    return merkleRoot(ids).toLowerCase() === root.toLowerCase();
+  } catch {
+    return false;
+  }
 }
 
 /** Solidity enum order: BelowFirst = 0, AboveLast = 1, Bracket = 2. */
@@ -212,11 +230,23 @@ export class HubClient {
   }
 
   /**
-   * Reconstruct round `nonce`'s consumed-id manifest from executeRound
-   * calldata. The id list is signature-bound: the unanimously signed digest
-   * commits to the merkle root the contract derived from this exact calldata,
-   * so a creditor needs only an RPC endpoint — NEVER a coordinator endpoint,
-   * which could serve a fabricated leaf set to break non-inclusion proofs.
+   * Reconstruct round `nonce`'s consumed-id manifest from settlement calldata.
+   * The id list is signature-bound: the unanimously signed digest commits to
+   * the merkle root the contract derived from this exact calldata, so a
+   * creditor needs only an RPC endpoint — NEVER a coordinator endpoint, which
+   * could serve a fabricated leaf set to break non-inclusion proofs.
+   *
+   * Two settlement shapes reach a hub (CR-02): a direct `executeRound`, and a
+   * `PvPRouter.executePvP` bundle whose legs call `executeRound` internally.
+   * For the latter the transaction input carries the ROUTER's selector, which
+   * the hub ABI does not contain — decoding it against the hub ABI threw
+   * AbiFunctionSignatureNotFoundError, and since prepareRedemptionProofs walks
+   * every buffered nonce, one PvP settlement bricked redemption for the next
+   * RING rounds. Both shapes are decoded here, and the selected leg is
+   * confirmed by recomputing its merkle root against the `manifestHash` the
+   * RoundExecuted log itself carries — so a bundle whose two legs share a
+   * nonce across two hubs is disambiguated by the chain's own commitment, not
+   * by argument position.
    */
   async fetchManifest(nonce: bigint): Promise<Hex[]> {
     // earliestBlock (hub deploy block on live Arc) floors the scan — the
@@ -254,12 +284,62 @@ export class HubClient {
     if (logs.length === 0) {
       throw new Error(`no RoundExecuted event for round nonce ${nonce} at hub ${this.hub}`);
     }
-    const tx = await this.pub.getTransaction({ hash: logs[logs.length - 1].transactionHash });
-    const { functionName, args } = decodeFunctionData({ abi: clearingHubV2Abi, data: tx.input });
-    if (functionName !== "executeRound") {
-      throw new Error(`round ${nonce} tx ${tx.hash} is not an executeRound call`);
+    const log = logs[logs.length - 1];
+    // Non-indexed event field: present on any real log, but a decoding that
+    // could not recover it must degrade to nonce-only selection, not crash.
+    const committedRoot = log.args?.manifestHash;
+    const tx = await this.pub.getTransaction({ hash: log.transactionHash });
+
+    // Direct settlement: the hub's own selector.
+    let hubCall: ReturnType<typeof decodeFunctionData<typeof clearingHubV2Abi>> | undefined;
+    try {
+      hubCall = decodeFunctionData({ abi: clearingHubV2Abi, data: tx.input });
+    } catch {
+      hubCall = undefined; // not a hub call — try the router shape below
     }
-    return [...args[3]];
+    if (hubCall !== undefined) {
+      if (hubCall.functionName !== "executeRound") {
+        throw new Error(`round ${nonce} tx ${tx.hash} is not an executeRound call`);
+      }
+      const ids = [...hubCall.args[3]];
+      if (committedRoot !== undefined && !rootMatches(ids, committedRoot)) {
+        throw new Error(
+          `round ${nonce} tx ${tx.hash}: executeRound calldata does not hash to the logged manifestHash`,
+        );
+      }
+      return ids;
+    }
+
+    // PvP settlement: the router called into this hub. Pick the leg the log
+    // commits to — nonce narrows the candidates, the root decides.
+    let routerCall: ReturnType<typeof decodeFunctionData<typeof pvpRouterAbi>>;
+    try {
+      routerCall = decodeFunctionData({ abi: pvpRouterAbi, data: tx.input });
+    } catch {
+      throw new Error(
+        `round ${nonce} tx ${tx.hash} was settled by an unrecognised caller ` +
+          `(neither ClearingHubV2 nor PvPRouter calldata)`,
+      );
+    }
+    if (routerCall.functionName !== "executePvP") {
+      throw new Error(`round ${nonce} tx ${tx.hash} is not an executePvP call`);
+    }
+    const legs = [routerCall.args[0], routerCall.args[1]];
+    const candidates = legs.filter((l) => BigInt(l.nonce) === nonce);
+    if (candidates.length === 0) {
+      throw new Error(`round ${nonce} has no matching leg in PvP tx ${tx.hash}`);
+    }
+    const matched =
+      committedRoot === undefined
+        ? candidates
+        : candidates.filter((l) => rootMatches([...l.consumedIds], committedRoot));
+    if (matched.length !== 1) {
+      throw new Error(
+        `round ${nonce} tx ${tx.hash}: ${matched.length} PvP legs match the logged ` +
+          `manifestHash — cannot identify this hub's leg`,
+      );
+    }
+    return [...matched[0].consumedIds];
   }
 
   /**
