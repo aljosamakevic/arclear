@@ -316,8 +316,9 @@ reproduce these rules exactly:
 > 6962's largest-power-of-two split: a third party implementing the RFC's
 > split rule will produce different roots for every non-power-of-two leaf
 > count and diverge from this protocol. Under level-wise promotion the tree
-> shape is uniquely determined by the leaf count — the fact the
-> position-binding argument below rests on.
+> shape is uniquely determined by the leaf count — but note that the converse
+> does **not** hold, and the position-binding argument below does not rest on
+> it: a *verified* proof does not authenticate the `leafCount` it claims.
 
 ### Proof encodings
 
@@ -354,28 +355,55 @@ branch:
 ### Position-binding soundness
 
 Why can a prover not lie about `index` or `leafCount` to fake a bracketing
-claim (e.g. claim a non-last leaf is the last)? Because the sibling
-**consumption schedule** — at which levels a sibling is consumed and on which
-side — is completely determined by `(index, leafCount)`. Lying about either
-changes the schedule: the walk feeds different byte strings into keccak at
-some level, so reaching the true root would require a keccak256 second
-preimage. The one subtle case — shrinking `leafCount` to claim a non-last
-leaf is last — fails because the true tree pairs that node as a left child
-somewhere, while the fake path promotes it (or pairs it right); the inputs
-diverge and the roots mismatch. This argument is adversarially
+claim (e.g. claim a non-last leaf is the last)? **Not** because `leafCount`
+is bound by the root — it is not, and stating otherwise is the easy mistake
+here. What verification binds is the sibling **consumption schedule**: the
+sequence of levels at which a sibling is consumed and on which side. That
+schedule is determined by `(index, leafCount)`, and reaching a genuine root
+from a genuine leaf hash requires replaying that leaf's own schedule with
+that leaf's own siblings — any lie that *changes* the schedule feeds
+different byte strings into keccak and would need a keccak256 second
+preimage.
+
+But many `(index, leafCount)` pairs share one schedule, so a lie that
+*preserves* it verifies. Enumerating every `(index, leafCount)` for leaf
+counts up to 64 yields 127 distinct schedules, of which **123 are shared
+across two or more different leaf counts** — e.g. a genuine 4-leaf root
+verifies a proof claiming `leafCount = 3`, at index 0 (schedule `R,R`) and at
+index 1 (schedule `L,R`) alike.
+
+Non-inclusion is nevertheless sound, and this is where the real argument
+lives — in the **kind-specific position checks**, not in `leafCount`:
+
+- **BelowFirst** forces the claimed index to 0. The schedule of index 0 is a
+  right-consumption at every level, and the only real leaf whose schedule is
+  all right-consumptions is leaf 0 (any nonzero index has an odd bit at some
+  level, which consumes on the left). So the anchor is genuinely the first
+  leaf, and `id < a.leaf` really does place `id` below the whole manifest.
+- **AboveLast** forces the claimed index to `leafCount − 1`. The last leaf is
+  the last node at every level, so its schedule mixes only left-consumptions
+  and promotions and **never** contains a right-consumption; conversely, once
+  a walk is at a non-last index it stays non-last, so every non-last real
+  leaf's schedule ends in a right-consumption at the final `w == 2` level.
+  The two sets are disjoint, so no non-last leaf can be re-anchored as last.
+- **Bracket** forces one shared claimed `leafCount` and consecutive claimed
+  indices, which pins the two anchors to a genuinely adjacent pair.
+
+Exhaustively enumerated: over all real manifests of n ≤ 64 leaves, against
+claimed leaf counts up to 4096 (BelowFirst/AboveLast) and 256 (Bracket),
+there are **zero** candidate forgeries of any kind — no member id can be made
+to prove its own non-inclusion. The property is also adversarially
 property-tested on both sides: random `index`/`leafCount` perturbations and
 sibling tampering must be rejected (fast-check in `test/merkle.test.ts`,
 512-run fuzz in `contracts/test/ClearingHubV2.t.sol`).
 
-One measured nuance (from the fuzz campaign): verification binds the
-**schedule**, not the literal `leafCount`. Certain leafCount lies are
-schedule-equivalent — e.g. claiming leafCount 4 instead of 3 for the leaf at
-index 0 consumes siblings identically and verifies in isolation. This is
-harmless for non-inclusion soundness because every branch adds
-kind-specific position checks (`index == 0`, `index == leafCount − 1`, equal
-leafCounts + adjacency) that reject every such lie in the shapes `redeemIOU`
-accepts — but implementers should not treat a verified inclusion proof's
-`leafCount` as an authenticated manifest size on its own.
+**Implementer's warning.** Because the argument rests on the position checks
+and not on `leafCount`, a verified inclusion proof's `leafCount` is **not** an
+authenticated manifest size — do not read it as one. Adding a new
+`NonInclusionKind` re-opens this question from scratch: it must come with its
+own disjointness argument over schedules, and the existing tests will not
+catch its absence. If `leafCount` is ever needed as a trusted value, commit
+it into the root (e.g. `root' = keccak256(0x02 ‖ root ‖ leafCount)`).
 
 ## IOU redemption
 
