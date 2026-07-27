@@ -517,6 +517,12 @@ export interface PvPLegState {
   /** Drop the pending record once its outcome is known and folded (settled)
    * or definitively nothing-executed (mined-and-reverted). */
   clearPendingSubmission(): void;
+  /** CR-03: true while this state already owns a submission whose fate is
+   * unknown. Recording over one destroys the only copy of the data needed to
+   * fold it, so the bundle must not start. Optional so structurally-typed
+   * stubs stay valid; the state owner's own recordPendingSubmission is the
+   * backstop that refuses the clobber outright. */
+  hasPendingSubmission?(): boolean;
 }
 
 /** One hub's injected dependencies: address, a HubClient-shaped reader
@@ -596,6 +602,24 @@ export async function runPvPRound(deps: PvPRunDeps): Promise<PvPRunResult> {
   usdc.state.hold(holdReason);
   eurc.state.hold(holdReason);
   try {
+    // CR-03: `hold` is only consulted at runRound's ENTRY, so it cannot stop a
+    // round already awaiting a receipt. If either leg's coordinator still owns
+    // an unreconciled submission, recording ours would destroy the only copy
+    // of the data needed to fold it — and with no on-chain settled-id
+    // nullifier, that is a real double-settlement. Blocked-as-data.
+    for (const [name, legDeps] of [
+      ["usdc", usdc],
+      ["eurc", eurc],
+    ] as const) {
+      if (legDeps.state.hasPendingSubmission?.()) {
+        return {
+          outcome: "blocked",
+          reason:
+            `${name} hub has an unreconciled submission in flight — refusing to start a PvP ` +
+            `bundle until it is resolved (CONS-04)`,
+        };
+      }
+    }
     const nonceU = await usdc.reader.roundNonce();
     const nonceE = await eurc.reader.roundNonce();
     const { fxNumerator, fxDenominator } = quoteToRate(deps.quote);

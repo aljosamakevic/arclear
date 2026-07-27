@@ -334,6 +334,32 @@ export interface ExecutedRound {
   pvp?: { fxNumerator: string; fxDenominator: string };
 }
 
+/** One broadcast (or attempted broadcast) awaiting a verdict from chain state. */
+export interface PendingSubmission {
+  roundNonce: bigint;
+  digest: Hex;
+  consumedIds: Hex[];
+  sentAtBlock: bigint;
+  txHash?: Hex;
+}
+
+/**
+ * CR-02: how long a pending record whose transaction can still plausibly mine
+ * keeps blocking new rounds. Past this the record moves to
+ * `unresolvedSubmissions` (still reconciled every round, just no longer
+ * blocking), so a transport failure degrades into a delay instead of a
+ * permanent wedge. Arc blocks are fast; 50 is far beyond any honest inclusion
+ * delay while staying short enough that a hosted demo recovers by itself.
+ */
+export const PENDING_MAX_BLOCKS = 50n;
+
+/**
+ * CR-02: hard cap on unresolved records. Reaching it means many broadcasts in
+ * a row died with the nonce unmoved — a broken relayer, not a transient blip —
+ * and the safe answer is to stop assembling rounds, not to forget evidence.
+ */
+export const MAX_UNRESOLVED_SUBMISSIONS = 16;
+
 /**
  * Demo coordinator: accumulates signed IOUs, runs netting rounds through the
  * full lifecycle. Holds no keys and no authority — every agent independently
@@ -356,13 +382,19 @@ export class Coordinator {
   /** Default wall-clock consent window per collection pass (D-05). */
   readonly consentWindowMs: number;
   /** Submitted executeRound not yet folded into settledIds (WR-01/CONS-04). */
-  private pendingSubmission?: {
-    roundNonce: bigint;
-    digest: Hex;
-    consumedIds: Hex[];
-    sentAtBlock: bigint;
-    txHash?: Hex;
-  };
+  private pendingSubmission?: PendingSubmission;
+
+  /**
+   * CR-02: submissions evicted from the pending slot before their fate was
+   * known (a broadcast whose transport died with a transaction that may still
+   * be sitting in the mempool). Unblocking on them is only safe BECAUSE they
+   * stay here: every later reconcile re-asks the chain "did this digest
+   * execute?" and folds its consumedIds the moment it did. A record leaves
+   * this list only when it is definitively resolved — executed (folded) or
+   * impossible (the hub's monotonic roundNonce moved past it, so the
+   * transaction can now only revert WrongRoundNonce).
+   */
+  private unresolvedSubmissions: PendingSubmission[] = [];
 
   /** External hold (Pitfall 4): while set, runRound refuses to start. The
    * PvP wrapper holds BOTH hubs' coordinators while a bundle is in flight so
@@ -406,14 +438,29 @@ export class Coordinator {
    * from RoundExecuted logs instead of silently re-netting consumed ids.
    * Grants no authority — it can only make this instance MORE conservative.
    */
-  recordPendingSubmission(p: {
-    roundNonce: bigint;
-    digest: Hex;
-    consumedIds: Hex[];
-    sentAtBlock: bigint;
-    txHash?: Hex;
-  }) {
+  recordPendingSubmission(p: PendingSubmission) {
+    const cur = this.pendingSubmission;
+    // CR-03: the pending record is the ONLY copy of the data needed to fold a
+    // settlement whose receipt was lost. Overwriting it with a different
+    // submission (a PvP leg landing on a coordinator that is already awaiting
+    // a receipt) destroys that evidence — and because ClearingHubV2 gates only
+    // on `redeemed[]`, with no on-chain settled-id nullifier, off-chain
+    // settledIds is the sole defense against re-netting settled paper. Refuse.
+    if (cur !== undefined && cur.digest.toLowerCase() !== p.digest.toLowerCase()) {
+      throw new Error(
+        `refusing to overwrite an unreconciled pending submission (round ${cur.roundNonce}, ` +
+          `digest ${cur.digest}) with round ${p.roundNonce} digest ${p.digest} — ` +
+          `reconcile it before recording another`,
+      );
+    }
     this.pendingSubmission = p;
+  }
+
+  /** True while a submission's fate is unknown — a second submitter must not
+   *  start one here (CR-03). Includes records that stopped blocking but are
+   *  still awaiting a chain verdict. */
+  hasPendingSubmission(): boolean {
+    return this.pendingSubmission !== undefined || this.unresolvedSubmissions.length > 0;
   }
 
   /** Drop the pending record — its outcome was confirmed and folded (or it
@@ -491,38 +538,106 @@ export class Coordinator {
   }
 
   /**
+   * Did THIS exact submission execute? The logged `roundHash` IS the EIP-712
+   * digest the participants signed, so a digest match at the record's nonce is
+   * proof — independent of whose transaction carried it or whether we ever saw
+   * a receipt. Folds the consumedIds on a match.
+   */
+  private async foldIfExecuted(record: PendingSubmission): Promise<boolean> {
+    const logs = await this.pub.getContractEvents({
+      address: this.hub,
+      // WR-02 (review): bind to the deployed contract's ABI. The v1 and v2
+      // RoundExecuted signatures happen to be byte-identical today, but a
+      // future V2 event change must not silently zero out this "was our
+      // round mined?" check — that would re-net already-settled paper.
+      abi: clearingHubV2Abi,
+      eventName: "RoundExecuted",
+      args: { roundNonce: record.roundNonce },
+      fromBlock: record.sentAtBlock,
+    });
+    const ours = logs.some(
+      (l) => (l.args.roundHash ?? "").toLowerCase() === record.digest.toLowerCase(),
+    );
+    if (ours) {
+      for (const id of record.consumedIds) this.settledIds.add(id.toLowerCase() as Hex);
+    }
+    return ours;
+  }
+
+  /**
+   * CR-02: is one of OUR OWN transactions still able to mine? The relayer's
+   * pending-vs-latest transaction count answers it exactly: equal counts mean
+   * the mempool holds nothing of ours, so a submission whose nonce never moved
+   * definitively did not execute and never will. Unknown (no relayer address,
+   * an RPC that cannot answer) is treated as "yes, possibly" — the block bound
+   * is what guarantees progress in that case, never an optimistic guess.
+   */
+  private async relayerMayStillMine(): Promise<boolean> {
+    const from = this.relayerWallet?.account?.address;
+    if (from === undefined || typeof this.pub.getTransactionCount !== "function") return true;
+    try {
+      const [latest, pending] = await Promise.all([
+        this.pub.getTransactionCount({ address: from, blockTag: "latest" }),
+        this.pub.getTransactionCount({ address: from, blockTag: "pending" }),
+      ]);
+      return pending !== latest;
+    } catch {
+      return true;
+    }
+  }
+
+  /**
+   * CR-02: re-ask the chain about every submission we stopped blocking on.
+   * Executed → fold. Nonce moved past it → it can only revert WrongRoundNonce
+   * now, so it is dead. Anything else stays on the list.
+   */
+  private async reconcileUnresolvedSubmissions(onChainNonce: bigint): Promise<void> {
+    if (this.unresolvedSubmissions.length === 0) return;
+    const keep: PendingSubmission[] = [];
+    for (const record of this.unresolvedSubmissions) {
+      if (await this.foldIfExecuted(record)) continue; // settled — folded
+      if (onChainNonce > record.roundNonce) continue; // can never execute now
+      keep.push(record);
+    }
+    this.unresolvedSubmissions = keep;
+  }
+
+  /**
    * WR-01 (CONS-04 "never twice"): a submitted executeRound whose receipt wait
    * failed (RPC transport error, crash) may still have mined. Before netting
    * again, reconcile against chain state: fold the pending proposal's
    * consumedIds into settledIds iff its RoundExecuted log is on-chain — the
    * logged `roundHash` IS the EIP-712 digest participants signed — and refuse
    * to start a new round while the submission is still genuinely in flight.
+   *
+   * CR-02: "still in flight" is now BOUNDED and self-healing. The old third
+   * branch returned blocked forever for the commonest failure of all — an
+   * executeRound call that threw before any transaction existed (a 429), which
+   * left a record with no txHash and an unmoved nonce that nothing could ever
+   * resolve. Three escapes now exist, in increasing order of caution: the
+   * relayer's own mempool proves nothing of ours can mine; the receipt proves
+   * a revert; or the record ages out of the blocking slot into
+   * `unresolvedSubmissions`, where it keeps being reconciled every round.
    */
   private async reconcilePendingSubmission(): Promise<
     { blocked: false } | { blocked: true; reason: string }
   > {
     const pending = this.pendingSubmission;
-    if (!pending) return { blocked: false };
     const onChainNonce = await this.hubClient.roundNonce();
+    await this.reconcileUnresolvedSubmissions(onChainNonce);
+    if (this.unresolvedSubmissions.length >= MAX_UNRESOLVED_SUBMISSIONS) {
+      return {
+        blocked: true,
+        reason:
+          `${this.unresolvedSubmissions.length} submissions are still unresolved on-chain — ` +
+          `refusing to assemble more rounds until the relayer's transactions settle (CONS-04)`,
+      };
+    }
+    if (!pending) return { blocked: false };
     if (onChainNonce > pending.roundNonce) {
-      // The nonce was consumed — by our round or by a concurrent one.
-      const logs = await this.pub.getContractEvents({
-        address: this.hub,
-        // WR-02 (review): bind to the deployed contract's ABI. The v1 and v2
-        // RoundExecuted signatures happen to be byte-identical today, but a
-        // future V2 event change must not silently zero out this "was our
-        // round mined?" check — that would re-net already-settled paper.
-        abi: clearingHubV2Abi,
-        eventName: "RoundExecuted",
-        args: { roundNonce: pending.roundNonce },
-        fromBlock: pending.sentAtBlock,
-      });
-      const ours = logs.some(
-        (l) => (l.args.roundHash ?? "").toLowerCase() === pending.digest.toLowerCase(),
-      );
-      if (ours) {
-        for (const id of pending.consumedIds) this.settledIds.add(id.toLowerCase() as Hex);
-      }
+      // The nonce was consumed — by our round or by a concurrent one. Either
+      // way ours can no longer execute, so the record is resolved here.
+      await this.foldIfExecuted(pending);
       this.pendingSubmission = undefined;
       return { blocked: false };
     }
@@ -536,6 +651,30 @@ export class Coordinator {
         return { blocked: false };
       }
     }
+
+    // Nothing executed at this nonce: executeRound is roundNonce's only writer
+    // and it is monotonic, so an unmoved nonce PROVES this submission has not
+    // settled. The sole residual risk is one of our own transactions still
+    // waiting in the mempool.
+    if (!(await this.relayerMayStillMine())) {
+      this.pendingSubmission = undefined;
+      return { blocked: false };
+    }
+
+    const tip = await this.pub.getBlockNumber({ cacheTime: 0 }).catch(() => undefined);
+    if (tip !== undefined && tip > pending.sentAtBlock + PENDING_MAX_BLOCKS) {
+      // Aged out of the blocking slot. It is NOT forgotten: it keeps being
+      // reconciled every round until the chain says executed or impossible,
+      // which is what makes unblocking here safe.
+      this.unresolvedSubmissions.push(pending);
+      this.pendingSubmission = undefined;
+      this.lastError = redactSensitive(
+        `submission for round ${pending.roundNonce} unconfirmed after ${PENDING_MAX_BLOCKS} ` +
+          `blocks — still tracked for reconciliation, new rounds resumed`,
+      );
+      return { blocked: false };
+    }
+
     return {
       blocked: true,
       reason:
@@ -636,14 +775,19 @@ export class Coordinator {
         // a LOWER bound for the reconciliation scan, so staleness can only
         // widen the range — never hide a RoundExecuted log.
         const sentAtBlock = await this.pub.getBlockNumber();
-        this.pendingSubmission = {
+        // CR-03: through the guarded setter, so this can never silently
+        // destroy an unreconciled record (e.g. a PvP leg recorded concurrently
+        // on this same coordinator).
+        const record: PendingSubmission = {
           roundNonce: proposal.roundNonce,
           digest: proposal.digest,
           consumedIds: proposal.consumedIds,
           sentAtBlock,
         };
+        this.recordPendingSubmission(record);
         const txHash = await this.hubClient.executeRound(this.relayerWallet, proposal, signatures);
-        this.pendingSubmission.txHash = txHash;
+        record.txHash = txHash;
+        this.recordPendingSubmission(record);
         const receipt = await this.pub.waitForTransactionReceipt({ hash: txHash });
         if (receipt.status !== "success") {
           // Definitively mined-and-reverted: nothing executed, nothing pending.
