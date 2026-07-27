@@ -10,96 +10,109 @@ import {
 } from "viem";
 import type { Account } from "viem/accounts";
 import { arcTestnet, MIN_MAX_FEE_PER_GAS } from "./domain.js";
-import { clearingHubAbi } from "./abi/ClearingHub.js";
-import { clearingHubV2Abi } from "./abi/ClearingHubV2.js";
-import { pvpRouterAbi } from "./abi/PvPRouter.js";
-import {
-  merkleRoot,
-  nonInclusionProof,
-  type InclusionProof,
-  type NonInclusionProof,
-} from "./merkle.js";
+import { clearingHubV3Abi } from "./abi/ClearingHubV3.js";
+import { pvpRouterV3Abi } from "./abi/PvPRouterV3.js";
+import { manifestLeafId, merkleRoot } from "./merkle.js";
 import { unionParticipants } from "./pvp.js";
-import type { Iou, PvPProposal, RoundProposal } from "./types.js";
+import { consumedRefs } from "./round.js";
+import type { ConsumedIou, Iou, PvPProposal, RoundProposal } from "./types.js";
 
-export { clearingHubAbi };
-
-/**
- * executeRound gas formula coefficients — measured across PARTICIPANT COUNT,
- * intrinsic gas included (contracts/test/GasScaling.t.sol; every point below
- * is asserted there, so these constants cannot silently drift).
- *
- * B-CR-03: the previous coefficients (40,000/participant, 6,000/id) came from
- * measurements that only ever varied `m` at n=5 — the per-participant term was
- * never measured at all — and from `gasleft()` deltas, which EXCLUDE the
- * 21,000 + 16/non-zero-calldata-byte a submitter actually pays. Both errors
- * pushed the same way: at n=30/m=15 the old formula supplied 1,590,000 against
- * 1,763,412 needed, i.e. a deterministic out-of-gas revert that burns
- * USDC-denominated fees, for pool sizes docs/CALIBRATION.md explicitly
- * analyzes (n = 15/30/50). Crossover was around n=16.
- *
- * Worst-case shape measured: one funded debtor plus n-1 fresh creditors, so
- * every participant pays a 0 -> non-zero SSTORE for `collateral` AND
- * `lastRound` (two 20,000-gas writes) on top of ecrecover and the event.
- *
- * | n  | m   | execution | intrinsic | total     | formula   | margin |
- * |----|-----|-----------|-----------|-----------|-----------|--------|
- * | 2  | 1   |   159,961 |    27,136 |   187,097 |   488,000 |  2.61x |
- * | 5  | 3   |   324,033 |    34,112 |   358,145 |   774,000 |  2.16x |
- * | 15 | 8   |   863,338 |    56,564 |   919,902 | 1,714,000 |  1.86x |
- * | 30 | 15  | 1,673,516 |    89,896 | 1,763,412 | 3,120,000 |  1.77x |
- * | 50 | 25  | 2,765,066 |   134,668 | 2,899,734 | 5,000,000 |  1.72x |
- * | 5  | 105 |   714,417 |    86,192 |   800,609 | 1,590,000 |  1.99x |
- * | 5  | 250 | 1,279,053 |   160,300 | 1,439,353 | 2,750,000 |  1.91x |
- *
- * Implied marginal costs: ~54,400 gas per participant and ~4,400 per id, both
- * intrinsic-inclusive. Explicit gas is mandatory on Arc: USDC is the gas
- * token, so estimation reserves the whole balance.
- */
-export const EXECUTE_ROUND_GAS_BASE = 300_000n;
-export const EXECUTE_ROUND_GAS_PER_PARTICIPANT = 90_000n;
-export const EXECUTE_ROUND_GAS_PER_ID = 8_000n;
+export { clearingHubV3Abi, pvpRouterV3Abi };
 
 /**
- * redeemIOU flat gas limit — measured 199,604 with RING=16 fully populated by
- * 8-id manifests (forge snapshot, plan 02-05, 2026-07-23).
+ * ClearingHubV3 `executeRound` gas formula, intrinsic gas included:
  *
- * B-WR-02: that measurement is a `gasleft()` delta and excludes intrinsic gas,
- * so the old "500,000 is 2.51x" claim was intrinsic-blind. At demo-scale
- * ~105-id manifests the sixteen bracketing proofs carry ~7 siblings each
- * instead of 3 — several KB of near-all-non-zero calldata — and the true
- * margin is far smaller (the audit derives ≈1.35x). Still covered on the
- * deployed RING=16 hubs, but this constant has NOT been re-measured at demo
- * scale: treat 500,000 as covered-but-not-comfortable until it is.
- */
-export const REDEEM_IOU_GAS = 500_000n;
-
-/**
- * executePvP gas formula coefficients — the two legs reuse the executeRound
- * coefficients above, so B-WR-01's under-provisioning (~1.0x margin at n=30
- * per leg, uncovered from n≥40) was entirely inherited from B-CR-03 and is
- * fixed by the corrected leg terms. These two constants cover the router's own
- * overhead: leg calldata, 2x hashRound recomputation, the union merge, and one
- * ECDSA recover per union member. Measured router-attributable execution is
- * ~298,000 at n=30 and ~525,000 at n=50 per bundle — the growth is per-union-
- * member and is what PVP_GAS_PER_UNION_SIG pays for, so the fixed base did not
- * need to move.
+ *   gas = BASE + PER_PARTICIPANT * n + PER_REF * m
  *
- * Measured, intrinsic included (contracts/test/GasScaling.t.sol, both legs
- * over the same n participants so union = n):
+ * Every constant below is the FITTED formula pinned by `assertLe` at every
+ * measured point in contracts/test/GasScalingV3.t.sol, so it cannot silently
+ * drift from the contract. Worst-case shape: a fresh hub at nonce 0 with one
+ * funded debtor and n-1 fresh creditors, so every participant pays cold
+ * SSTOREs for BOTH `collateral` and `lastRound`.
  *
- * | n/leg | m/leg | execution | intrinsic | total     | formula    | margin |
- * |-------|-------|-----------|-----------|-----------|------------|--------|
- * | 3     | 10    |   559,152 |    52,692 |   611,844 |  1,695,000 |  2.77x |
- * | 5     | 105   | 1,779,054 |   160,488 | 1,939,542 |  3,605,000 |  1.86x |
- * | 30    | 15    | 3,645,115 |   204,332 | 3,849,447 |  7,040,000 |  1.83x |
- * | 50    | 25    | 6,054,934 |   322,900 | 6,377,834 | 11,100,000 |  1.74x |
+ * | n  | m   | execution | intrinsic | total     | formula    | margin |
+ * |----|-----|-----------|-----------|-----------|------------|--------|
+ * | 2  | 1   |   136,939 |    27,392 |   164,331 |    525,000 |  3.19x |
+ * | 5  | 3   |   349,207 |    34,940 |   384,147 |    885,000 |  2.30x |
+ * | 15 | 8   | 1,010,180 |    58,684 | 1,068,864 |  2,010,000 |  1.88x |
+ * | 30 | 15  | 1,991,223 |    93,916 | 2,085,139 |  3,675,000 |  1.76x |
+ * | 50 | 25  | 3,328,395 |   141,380 | 3,469,775 |  5,925,000 |  1.71x |
+ * | 5  | 105 | 3,202,035 |   114,344 | 3,316,379 |  5,475,000 |  1.65x |
+ * | 5  | 250 | 7,462,110 |   227,216 | 7,689,326 | 12,000,000 |  1.56x |
+ *
+ * Implied marginals: ~54,300 per participant (unchanged from V2) and ~28,600
+ * to ~30,600 PER CONSUMED REF — a 6.5x jump from V2's ~4,400. That jump is
+ * the price of the CR-02 fix and is deliberate: each ref now pays a COLD
+ * SSTORE (20,000 + 2,100) into the hub's permanent `consumed` ledger, plus a
+ * three-word calldata entry instead of one bytes32. V2's cheaper round bought
+ * a redemption guarantee any third party could permanently destroy; V3's
+ * dearer round buys one that nothing can erode. The counterpart saving is on
+ * the other side of the product — see REDEEM_IOU_GAS.
  *
  * Explicit gas is mandatory on Arc: USDC is the gas token, so estimation
  * reserves the whole balance.
  */
-export const PVP_ROUTER_GAS_BASE = 350_000n;
-export const PVP_GAS_PER_UNION_SIG = 15_000n;
+export const EXECUTE_ROUND_GAS_BASE = 300_000n;
+export const EXECUTE_ROUND_GAS_PER_PARTICIPANT = 90_000n;
+export const EXECUTE_ROUND_GAS_PER_REF = 45_000n;
+
+/**
+ * ClearingHubV3 `redeemIOU` flat gas limit — and it genuinely is flat now.
+ *
+ * V2's redemption walked a RING-slot ring of roots with one bracketing
+ * non-inclusion proof each: 199,604 gas of execution plus multiple KB of
+ * near-all-non-zero proof calldata, growing with both RING and manifest size,
+ * at a margin the audit derived as ≈1.35x under the old 500,000 limit.
+ *
+ * V3 takes NO proofs. Exclusivity is a single `consumed[leafId]` SLOAD, so
+ * `test_gas_v3_redeemIOU_isHistoryIndependent` measures 57,779 execution gas
+ * identically after 4 rounds and after 64 — the same 24,212 intrinsic, 82,003
+ * total either way. 150,000 is a 1.83x margin over the measured worst point
+ * and, unlike its predecessor, is not a function of anything a third party
+ * controls.
+ */
+export const REDEEM_IOU_GAS = 150_000n;
+
+/**
+ * PvPRouterV3 `executePvP` gas formula, intrinsic gas included:
+ *
+ *   gas = BASE + PER_PARTICIPANT * (nUsdc + nEurc)
+ *              + PER_UNION_SIG   * unionSize
+ *              + PER_REF         * (mUsdc + mEurc)
+ *
+ * Four additive terms, not "two legs of the executeRound formula plus router
+ * overhead" as in V2. Participants and union members are counted separately
+ * because they cost different things: a participant costs its hub an ecrecover,
+ * two cold SSTOREs and a log; a union member costs the router one ecrecover
+ * over an already-computed digest. Identical participant sets collapse the
+ * union to n while keeping 2n participants; disjoint sets take it to 2n — both
+ * regimes are measured, which is what brackets the two coefficients.
+ *
+ * Pinned in BOTH directions at every point in GasScalingPvPV3.t.sol: `assertLe`
+ * of measurement against formula (never under-provision) and of formula against
+ * 1.5x measurement (never let the estimate rot into a meaningless number).
+ *
+ * | n/leg | m/leg | union | execution  | intrinsic | total      | formula    | margin |
+ * |-------|-------|-------|------------|-----------|------------|------------|--------|
+ * | 2     | 1     |   2   |    308,637 |    38,556 |    347,193 |    426,000 |  1.23x |
+ * | 3     | 2     |   3   |    482,185 |    45,524 |    527,709 |    639,000 |  1.21x |
+ * | 3     | 2     |   6   |    495,783 |    49,952 |    545,735 |    666,000 |  1.22x |
+ * | 10    | 5     |  20   |  1,498,644 |   102,644 |  1,601,288 |  1,900,000 |  1.19x |
+ * | 15    | 8     |  15   |  2,197,010 |   120,104 |  2,317,114 |  2,715,000 |  1.17x |
+ * | 30    | 15    |  30   |  4,336,796 |   212,240 |  4,549,036 |  5,270,000 |  1.16x |
+ * | 5     | 105   |   5   |  7,114,611 |   216,936 |  7,331,547 |  9,145,000 |  1.25x |
+ * | 5     | 250   |   5   | 16,980,362 |   442,548 | 17,422,910 | 20,745,000 |  1.19x |
+ *
+ * Margins are tighter than V2's (14-25% vs 70-180%) by design: the V2 estimate
+ * was loose enough to stop meaning anything, and both bounds are now asserted.
+ *
+ * Explicit gas is mandatory on Arc: USDC is the gas token, so estimation
+ * reserves the whole balance.
+ */
+export const PVP_GAS_BASE = 80_000n;
+export const PVP_GAS_PER_PARTICIPANT = 62_000n;
+export const PVP_GAS_PER_UNION_SIG = 9_000n;
+export const PVP_GAS_PER_REF = 40_000n;
 
 export function publicClient(rpcUrl?: string): PublicClient {
   return createPublicClient({ chain: arcTestnet, transport: http(rpcUrl) });
@@ -130,36 +143,56 @@ export function walletClient(account: Account, rpcUrl?: string): WalletClient {
 }
 
 /**
- * Does this id list hash to the root the chain committed to? Total: a list the
- * merkle builder refuses (unsorted, duplicated) is simply not a match, never a
- * throw — the caller is choosing between candidates, not validating input.
+ * One entry of a manifest reconstructed from settlement calldata: the raw ref
+ * as the chain saw it, plus the party-bound leaf the hub derived from it.
  */
-function rootMatches(ids: Hex[], root: Hex): boolean {
+export interface ReconstructedRef {
+  id: Hex;
+  partyA: Address;
+  partyB: Address;
+  /** manifestLeafId(id, partyA, partyB) — the hub's consumption-ledger key. */
+  leafId: Hex;
+}
+
+/**
+ * Resolve on-chain `ConsumedRef`s against their leg's participants into the
+ * leaves the hub actually committed. Total: out-of-range indices or malformed
+ * ids yield `undefined` (not a match candidate), never a throw — the caller is
+ * choosing between candidate legs, not validating trusted input.
+ */
+function reconstructRefs(
+  participants: readonly Address[],
+  refs: readonly { id: Hex; partyAIdx: number; partyBIdx: number }[],
+): ReconstructedRef[] | undefined {
   try {
-    return merkleRoot(ids).toLowerCase() === root.toLowerCase();
+    return refs.map((r) => {
+      const partyA = participants[r.partyAIdx];
+      const partyB = participants[r.partyBIdx];
+      if (partyA === undefined || partyB === undefined) {
+        throw new Error(`party index out of range for ${r.id}`);
+      }
+      return { id: r.id, partyA, partyB, leafId: manifestLeafId(r.id, partyA, partyB) };
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Does this reconstructed manifest hash to the root the chain committed to?
+ * Total: a leaf list the merkle builder refuses (unsorted, duplicated) is
+ * simply not a match, never a throw.
+ */
+function rootMatches(refs: ReconstructedRef[] | undefined, root: Hex): boolean {
+  if (refs === undefined) return false;
+  try {
+    return merkleRoot(refs.map((r) => r.leafId)).toLowerCase() === root.toLowerCase();
   } catch {
     return false;
   }
 }
 
-/** Solidity enum order: BelowFirst = 0, AboveLast = 1, Bracket = 2. */
-const KIND_TO_UINT = { belowFirst: 0, aboveLast: 1, bracket: 2 } as const;
-
-function toAbiInclusion(p: InclusionProof) {
-  return {
-    leaf: p.leaf,
-    index: BigInt(p.index),
-    leafCount: BigInt(p.leafCount),
-    siblings: p.siblings,
-  };
-}
-
-/** TS proof → ABI tuple: index/leafCount widen to bigint, kind to its enum uint. */
-function toAbiProof(p: NonInclusionProof) {
-  return { kind: KIND_TO_UINT[p.kind], a: toAbiInclusion(p.a), b: toAbiInclusion(p.b) };
-}
-
-/** Typed wrapper around one ClearingHubV2 deployment. */
+/** Typed wrapper around one ClearingHubV3 deployment. */
 export class HubClient {
   /** Lower bound for every unbounded event scan this client issues. Defaults
    * to 0n (anvil/tests run against full-history nodes — behavior unchanged).
@@ -178,7 +211,7 @@ export class HubClient {
   collateral(participant: Address): Promise<bigint> {
     return this.pub.readContract({
       address: this.hub,
-      abi: clearingHubV2Abi,
+      abi: clearingHubV3Abi,
       functionName: "collateral",
       args: [participant],
     });
@@ -186,24 +219,38 @@ export class HubClient {
 
   roundNonce(): Promise<bigint> {
     return this.pub
-      .readContract({ address: this.hub, abi: clearingHubV2Abi, functionName: "roundNonce" })
+      .readContract({ address: this.hub, abi: clearingHubV3Abi, functionName: "roundNonce" })
       .then(BigInt);
   }
 
   token(): Promise<Address> {
     return this.pub.readContract({
       address: this.hub,
-      abi: clearingHubV2Abi,
+      abi: clearingHubV3Abi,
       functionName: "token",
     });
   }
 
-  /** Nonce of the round AFTER the participant's last consented round (0 = never). */
+  /** The hub's staleness gate K: a debtor is redeemable-against after being
+   *  absent from the last >= K executed rounds. */
+  K(): Promise<bigint> {
+    return this.pub
+      .readContract({ address: this.hub, abi: clearingHubV3Abi, functionName: "K" })
+      .then(BigInt);
+  }
+
+  /**
+   * 1-based marker of the last round in which this address actually SETTLED
+   * something — a non-zero delta, or a ConsumedRef naming them as a party
+   * (0 = never). V3/WR-11 narrowed this from V2's "last round co-signed": mere
+   * co-signature no longer refreshes the liveness clock, so an address cannot
+   * stay non-stale by rubber-stamping rounds it has no stake in.
+   */
   lastRound(participant: Address): Promise<bigint> {
     return this.pub
       .readContract({
         address: this.hub,
-        abi: clearingHubV2Abi,
+        abi: clearingHubV3Abi,
         functionName: "lastRound",
         args: [participant],
       })
@@ -220,7 +267,7 @@ export class HubClient {
   async roundExecutedHashes(roundNonce: bigint, fromBlock: bigint): Promise<Hex[]> {
     const logs = await this.pub.getContractEvents({
       address: this.hub,
-      abi: clearingHubV2Abi,
+      abi: clearingHubV3Abi,
       eventName: "RoundExecuted",
       args: { roundNonce },
       fromBlock,
@@ -228,69 +275,92 @@ export class HubClient {
     return logs.flatMap((l) => (l.args.roundHash === undefined ? [] : [l.args.roundHash]));
   }
 
-  /** Nullifier check: has this IOU id already been redeemed on-chain? */
+  /** Nullifier check: has this IOU id already been redeemed on-chain? Keyed by
+   *  the RAW id, unlike `consumed` — only the debtor's own signature can write
+   *  here, so raw-id keying is the strictly more conservative choice. */
   redeemed(id: Hex): Promise<boolean> {
     return this.pub.readContract({
       address: this.hub,
-      abi: clearingHubV2Abi,
+      abi: clearingHubV3Abi,
       functionName: "redeemed",
       args: [id],
     });
   }
 
-  /** Buffered manifest root at ring slot `nonce % RING`. */
-  rootRing(slot: bigint): Promise<{ root: Hex; nonce: bigint; executedAt: bigint }> {
-    return this.pub
-      .readContract({
-        address: this.hub,
-        abi: clearingHubV2Abi,
-        functionName: "rootRing",
-        args: [slot],
-      })
-      .then(([root, nonce, executedAt]) => ({
-        root,
-        nonce: BigInt(nonce),
-        executedAt: BigInt(executedAt),
-      }));
+  /**
+   * The CR-02 consumption ledger: has any round ever netted this PARTY-BOUND
+   * leaf? This single O(1) read is the whole of V3's redemption precondition,
+   * replacing V2's ring of roots and its per-root non-inclusion proofs.
+   * Permanent by construction — nothing evicts, expires or rewrites an entry.
+   */
+  consumed(leafId: Hex): Promise<boolean> {
+    return this.pub.readContract({
+      address: this.hub,
+      abi: clearingHubV3Abi,
+      functionName: "consumed",
+      args: [leafId],
+    });
+  }
+
+  /** Convenience form of `consumed` for callers holding the IOU rather than
+   *  the leaf: has this exact obligation already been netted by a round? */
+  isConsumed(iou: Iou): Promise<boolean> {
+    return this.pub.readContract({
+      address: this.hub,
+      abi: clearingHubV3Abi,
+      functionName: "isConsumed",
+      args: [iou],
+    });
+  }
+
+  /** On-chain party-bound manifest leaf — parity-locked against the SDK's
+   *  manifestLeafId (test/fixtures/merkle.json + MerkleParityV3.t.sol). */
+  manifestLeafId(id: Hex, partyA: Address, partyB: Address): Promise<Hex> {
+    return this.pub.readContract({
+      address: this.hub,
+      abi: clearingHubV3Abi,
+      functionName: "manifestLeafId",
+      args: [id, partyA, partyB],
+    });
   }
 
   /** On-chain IOU digest — parity-locked against the SDK's iouId. */
   hashIou(iou: Iou): Promise<Hex> {
     return this.pub.readContract({
       address: this.hub,
-      abi: clearingHubV2Abi,
+      abi: clearingHubV3Abi,
       functionName: "hashIou",
       args: [iou],
     });
   }
 
-  /** The hub's RING immutable: how many executed-round roots stay buffered. */
-  ringSize(): Promise<bigint> {
-    return this.pub
-      .readContract({ address: this.hub, abi: clearingHubV2Abi, functionName: "RING" })
-      .then(BigInt);
-  }
-
   /**
-   * Reconstruct round `nonce`'s consumed-id manifest from settlement calldata.
-   * The id list is signature-bound: the unanimously signed digest commits to
-   * the merkle root the contract derived from this exact calldata, so a
-   * creditor needs only an RPC endpoint — NEVER a coordinator endpoint, which
-   * could serve a fabricated leaf set to break non-inclusion proofs.
+   * Reconstruct round `nonce`'s consumed manifest from settlement calldata,
+   * resolved into the party-bound leaves the hub committed.
+   *
+   * The manifest is signature-bound: the unanimously signed digest commits to
+   * the merkle root the contract derived from this exact calldata, so an
+   * auditor needs only an RPC endpoint — NEVER a coordinator endpoint, which
+   * could serve a fabricated leaf set.
+   *
+   * NOT a redemption dependency under v3. V2 needed this to build one
+   * non-inclusion proof per buffered root; V3's `redeemIOU` takes no proofs
+   * and `consumed(leafId)` answers the same question in O(1). What survives is
+   * the auditing use it always also had: independently recovering WHICH
+   * obligations a round extinguished, and — new in V3 — under WHICH party
+   * pair, which is the fact `consumed` is keyed on.
    *
    * Two settlement shapes reach a hub (CR-02): a direct `executeRound`, and a
-   * `PvPRouter.executePvP` bundle whose legs call `executeRound` internally.
+   * `PvPRouterV3.executePvP` bundle whose legs call `executeRound` internally.
    * For the latter the transaction input carries the ROUTER's selector, which
-   * the hub ABI does not contain — decoding it against the hub ABI threw
-   * AbiFunctionSignatureNotFoundError, and since prepareRedemptionProofs walks
-   * every buffered nonce, one PvP settlement bricked redemption for the next
-   * RING rounds. Both shapes are decoded here, and the selected leg is
-   * confirmed by recomputing its merkle root against the `manifestHash` the
-   * RoundExecuted log itself carries — so a bundle whose two legs share a
-   * nonce across two hubs is disambiguated by the chain's own commitment, not
-   * by argument position.
+   * the hub ABI does not contain — decoding it against the hub ABI throws
+   * AbiFunctionSignatureNotFoundError. Both shapes are decoded here, and the
+   * selected leg is confirmed by recomputing its merkle root against the
+   * `manifestHash` the RoundExecuted log itself carries — so a bundle whose
+   * two legs share a nonce across two hubs is disambiguated by the chain's own
+   * commitment, not by argument position.
    */
-  async fetchManifest(nonce: bigint): Promise<Hex[]> {
+  async fetchManifest(nonce: bigint): Promise<ReconstructedRef[]> {
     // earliestBlock (hub deploy block on live Arc) floors the scan — the
     // public RPC rejects from-genesis ranges as pruned history — and the
     // range is windowed because live providers also cap per-request spans.
@@ -307,7 +377,7 @@ export class HubClient {
       // blame the round. Name the real cause: a mis-set deploy block.
       throw new Error(
         `earliestBlock ${this.earliestBlock} is past the chain tip ${latest} — ` +
-          `check HUB_V2_DEPLOY_BLOCK for hub ${this.hub}`,
+          `check HUB_V3_DEPLOY_BLOCK for hub ${this.hub}`,
       );
     }
     const logs = [];
@@ -315,7 +385,7 @@ export class HubClient {
       logs.push(
         ...(await this.pub.getContractEvents({
           address: this.hub,
-          abi: clearingHubV2Abi,
+          abi: clearingHubV3Abi,
           eventName: "RoundExecuted",
           args: { roundNonce: nonce },
           fromBlock,
@@ -333,9 +403,9 @@ export class HubClient {
     const tx = await this.pub.getTransaction({ hash: log.transactionHash });
 
     // Direct settlement: the hub's own selector.
-    let hubCall: ReturnType<typeof decodeFunctionData<typeof clearingHubV2Abi>> | undefined;
+    let hubCall: ReturnType<typeof decodeFunctionData<typeof clearingHubV3Abi>> | undefined;
     try {
-      hubCall = decodeFunctionData({ abi: clearingHubV2Abi, data: tx.input });
+      hubCall = decodeFunctionData({ abi: clearingHubV3Abi, data: tx.input });
     } catch {
       hubCall = undefined; // not a hub call — try the router shape below
     }
@@ -343,66 +413,52 @@ export class HubClient {
       if (hubCall.functionName !== "executeRound") {
         throw new Error(`round ${nonce} tx ${tx.hash} is not an executeRound call`);
       }
-      const ids = [...hubCall.args[3]];
-      if (committedRoot !== undefined && !rootMatches(ids, committedRoot)) {
+      const refs = reconstructRefs(hubCall.args[1], hubCall.args[3]);
+      if (refs === undefined) {
+        throw new Error(
+          `round ${nonce} tx ${tx.hash}: executeRound calldata has a party index out of range`,
+        );
+      }
+      if (committedRoot !== undefined && !rootMatches(refs, committedRoot)) {
         throw new Error(
           `round ${nonce} tx ${tx.hash}: executeRound calldata does not hash to the logged manifestHash`,
         );
       }
-      return ids;
+      return refs;
     }
 
     // PvP settlement: the router called into this hub. Pick the leg the log
     // commits to — nonce narrows the candidates, the root decides.
-    let routerCall: ReturnType<typeof decodeFunctionData<typeof pvpRouterAbi>>;
+    let routerCall: ReturnType<typeof decodeFunctionData<typeof pvpRouterV3Abi>>;
     try {
-      routerCall = decodeFunctionData({ abi: pvpRouterAbi, data: tx.input });
+      routerCall = decodeFunctionData({ abi: pvpRouterV3Abi, data: tx.input });
     } catch {
       throw new Error(
         `round ${nonce} tx ${tx.hash} was settled by an unrecognised caller ` +
-          `(neither ClearingHubV2 nor PvPRouter calldata)`,
+          `(neither ClearingHubV3 nor PvPRouterV3 calldata)`,
       );
     }
     if (routerCall.functionName !== "executePvP") {
       throw new Error(`round ${nonce} tx ${tx.hash} is not an executePvP call`);
     }
     const legs = [routerCall.args[0], routerCall.args[1]];
-    const candidates = legs.filter((l) => BigInt(l.nonce) === nonce);
+    const candidates = legs
+      .filter((l) => BigInt(l.nonce) === nonce)
+      .map((l) => reconstructRefs(l.participants, l.consumedRefs));
     if (candidates.length === 0) {
       throw new Error(`round ${nonce} has no matching leg in PvP tx ${tx.hash}`);
     }
     const matched =
       committedRoot === undefined
-        ? candidates
-        : candidates.filter((l) => rootMatches([...l.consumedIds], committedRoot));
+        ? candidates.filter((r): r is ReconstructedRef[] => r !== undefined)
+        : candidates.filter((r): r is ReconstructedRef[] => rootMatches(r, committedRoot));
     if (matched.length !== 1) {
       throw new Error(
         `round ${nonce} tx ${tx.hash}: ${matched.length} PvP legs match the logged ` +
           `manifestHash — cannot identify this hub's leg`,
       );
     }
-    return [...matched[0].consumedIds];
-  }
-
-  /**
-   * Assemble the full contract-shaped proof array for redeeming `id`: the
-   * buffered nonce range is derived from on-chain roundNonce/RING exactly as
-   * redeemIOU derives it (ascending, count = min(roundNonce, RING)) — never
-   * caller-chosen. Empty manifests yield the structurally-valid placeholder
-   * (the contract short-circuits sentinel roots without reading content).
-   * TOCTOU: if a round lands before the redemption mines, the contract's
-   * count/position check reverts and the caller simply regenerates.
-   */
-  async prepareRedemptionProofs(id: Hex): Promise<NonInclusionProof[]> {
-    const nonce = await this.roundNonce();
-    const ring = await this.ringSize();
-    const count = nonce < ring ? nonce : ring;
-    const proofs: NonInclusionProof[] = [];
-    for (let n = nonce - count; n < nonce; n++) {
-      const ids = await this.fetchManifest(n);
-      proofs.push(nonInclusionProof(ids, id));
-    }
-    return proofs;
+    return matched[0];
   }
 
   /** On-chain digest — used to assert parity with the SDK's roundDigest. */
@@ -414,7 +470,7 @@ export class HubClient {
   }): Promise<Hex> {
     return this.pub.readContract({
       address: this.hub,
-      abi: clearingHubV2Abi,
+      abi: clearingHubV3Abi,
       functionName: "hashRound",
       args: [p.roundNonce, p.participants, p.deltas, p.manifestHash],
     });
@@ -423,7 +479,7 @@ export class HubClient {
   async deposit(wallet: WalletClient, amount: bigint): Promise<Hex> {
     return wallet.writeContract({
       address: this.hub,
-      abi: clearingHubV2Abi,
+      abi: clearingHubV3Abi,
       functionName: "deposit",
       args: [amount],
       chain: wallet.chain,
@@ -436,7 +492,7 @@ export class HubClient {
   async withdraw(wallet: WalletClient, amount: bigint): Promise<Hex> {
     return wallet.writeContract({
       address: this.hub,
-      abi: clearingHubV2Abi,
+      abi: clearingHubV3Abi,
       functionName: "withdraw",
       args: [amount],
       chain: wallet.chain,
@@ -446,27 +502,28 @@ export class HubClient {
     });
   }
 
-  /** Submit a fully consented round. Permissionless — any relayer works. */
+  /**
+   * Submit a fully consented round. Permissionless — any relayer works.
+   * The party-bound `ConsumedRef[]` is DERIVED here from the proposal's
+   * consumed set, never carried as calldata-shaped state: indices are
+   * meaningless without their participant array, so resolving them at the last
+   * possible moment is what keeps them consistent with what was signed.
+   */
   async executeRound(
     wallet: WalletClient,
     proposal: RoundProposal,
     signatures: Hex[],
   ): Promise<Hex> {
+    const refs = consumedRefs(proposal.participants, proposal.consumed);
     const gas =
       EXECUTE_ROUND_GAS_BASE +
       EXECUTE_ROUND_GAS_PER_PARTICIPANT * BigInt(proposal.participants.length) +
-      EXECUTE_ROUND_GAS_PER_ID * BigInt(proposal.consumedIds.length);
+      EXECUTE_ROUND_GAS_PER_REF * BigInt(refs.length);
     return wallet.writeContract({
       address: this.hub,
-      abi: clearingHubV2Abi,
+      abi: clearingHubV3Abi,
       functionName: "executeRound",
-      args: [
-        proposal.roundNonce,
-        proposal.participants,
-        proposal.deltas,
-        proposal.consumedIds,
-        signatures,
-      ],
+      args: [proposal.roundNonce, proposal.participants, proposal.deltas, refs, signatures],
       chain: wallet.chain,
       account: wallet.account!,
       maxFeePerGas: MIN_MAX_FEE_PER_GAS,
@@ -474,18 +531,20 @@ export class HubClient {
     });
   }
 
-  /** Redeem a stale-debtor IOU against the hub's buffered non-inclusion regime. */
-  async redeemIOU(
-    wallet: WalletClient,
-    iou: Iou,
-    sig: Hex,
-    proofs: NonInclusionProof[],
-  ): Promise<Hex> {
+  /**
+   * Redeem a stale-debtor IOU. NO PROOFS (v3 CR-02): the hub gates on
+   * `consumed[manifestLeafId(id, debtor, creditor)]`, one O(1) storage read
+   * whose answer no third party can manufacture. V2's proof array, root ring
+   * and TOCTOU regeneration loop are all gone — a round landing between the
+   * caller's decision and the mining of this transaction can no longer
+   * invalidate it, because there is no proof to invalidate.
+   */
+  async redeemIOU(wallet: WalletClient, iou: Iou, sig: Hex): Promise<Hex> {
     return wallet.writeContract({
       address: this.hub,
-      abi: clearingHubV2Abi,
+      abi: clearingHubV3Abi,
       functionName: "redeemIOU",
-      args: [iou, sig, proofs.map(toAbiProof)],
+      args: [iou, sig],
       chain: wallet.chain,
       account: wallet.account!,
       maxFeePerGas: MIN_MAX_FEE_PER_GAS,
@@ -495,18 +554,19 @@ export class HubClient {
 }
 
 /** One leg as the router's executePvP consumes it: the embedded RoundProposal
- *  fields plus its collected consent signatures, ABI-tuple-shaped. */
+ *  fields plus its collected consent signatures, ABI-tuple-shaped. Refs are
+ *  resolved against THIS leg's participants (Pitfall 3: never the other's). */
 function toAbiLeg(leg: RoundProposal, signatures: Hex[]) {
   return {
     nonce: leg.roundNonce,
     participants: leg.participants,
     deltas: leg.deltas,
-    consumedIds: leg.consumedIds,
+    consumedRefs: consumedRefs(leg.participants, leg.consumed),
     signatures,
   };
 }
 
-/** Typed wrapper around one PvPRouter deployment: hub-pair reads, PvPRound
+/** Typed wrapper around one PvPRouterV3 deployment: hub-pair reads, PvPRound
  *  digest parity checks, and formula-gas atomic PvP submission. */
 export class PvPRouterClient {
   private readonly pub: PublicClient;
@@ -522,7 +582,7 @@ export class PvPRouterClient {
   hubUSDC(): Promise<Address> {
     return this.pub.readContract({
       address: this.router,
-      abi: pvpRouterAbi,
+      abi: pvpRouterV3Abi,
       functionName: "hubUSDC",
     });
   }
@@ -531,7 +591,7 @@ export class PvPRouterClient {
   hubEURC(): Promise<Address> {
     return this.pub.readContract({
       address: this.router,
-      abi: pvpRouterAbi,
+      abi: pvpRouterV3Abi,
       functionName: "hubEURC",
     });
   }
@@ -545,9 +605,20 @@ export class PvPRouterClient {
   ): Promise<Hex> {
     return this.pub.readContract({
       address: this.router,
-      abi: pvpRouterAbi,
+      abi: pvpRouterV3Abi,
       functionName: "hashPvPRound",
       args: [usdcLegDigest, eurcLegDigest, fxNumerator, fxDenominator],
+    });
+  }
+
+  /** The router's local mirror of the hub's party-bound leaf derivation —
+   *  read it to assert the two implementations have not diverged. */
+  manifestLeafId(id: Hex, partyA: Address, partyB: Address): Promise<Hex> {
+    return this.pub.readContract({
+      address: this.router,
+      abi: pvpRouterV3Abi,
+      functionName: "manifestLeafId",
+      args: [id, partyA, partyB],
     });
   }
 
@@ -570,16 +641,15 @@ export class PvPRouterClient {
       proposal.eurcLeg.participants,
     ).length;
     const gas =
-      PVP_ROUTER_GAS_BASE +
-      2n * EXECUTE_ROUND_GAS_BASE +
-      EXECUTE_ROUND_GAS_PER_PARTICIPANT *
+      PVP_GAS_BASE +
+      PVP_GAS_PER_PARTICIPANT *
         BigInt(proposal.usdcLeg.participants.length + proposal.eurcLeg.participants.length) +
-      EXECUTE_ROUND_GAS_PER_ID *
-        BigInt(proposal.usdcLeg.consumedIds.length + proposal.eurcLeg.consumedIds.length) +
-      PVP_GAS_PER_UNION_SIG * BigInt(nUnion);
+      PVP_GAS_PER_UNION_SIG * BigInt(nUnion) +
+      PVP_GAS_PER_REF *
+        BigInt(proposal.usdcLeg.consumed.length + proposal.eurcLeg.consumed.length);
     return wallet.writeContract({
       address: this.router,
-      abi: pvpRouterAbi,
+      abi: pvpRouterV3Abi,
       functionName: "executePvP",
       args: [
         toAbiLeg(proposal.usdcLeg, legSignatures.usdc),
