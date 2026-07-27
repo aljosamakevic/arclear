@@ -13,6 +13,7 @@
  */
 import "./env.js";
 import { createServer } from "node:http";
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,6 +21,7 @@ import { setup } from "./setup.js";
 import { simulateTraffic } from "./simulate.js";
 import { Coordinator } from "./coordinator.js";
 import { printReport } from "./report.js";
+import { redactedMessage } from "./redact.js";
 
 const mode = process.argv.includes("--anvil") ? "anvil" : "testnet";
 const now = () => BigInt(Math.floor(Date.now() / 1000));
@@ -111,13 +113,30 @@ const server = createServer(async (req, res) => {
             const batch = await simulateTraffic(env.hub, env.personas, 35, {
               now: now(),
               chainId: env.chain.id,
-              amountDivisor: mode === "anvil" ? 1n : 10n,
+              // C-CR-01: traffic scale must stay inside the faucet-funded
+              // TESTNET_COLLATERAL (0.5/hub = 500,000 base units). The bursts
+              // are seeded deterministically (`traffic-${k}`), so every press
+              // adds the SAME delta vector and debits accumulate linearly.
+              // Traced offline over repeated presses (matches demo/e2e.ts:40,
+              // which rejected 10 for the same reason):
+              //   divisor 10 → worst debit -642,987 after 3 presses → REVERTS
+              //                (press+round interleaved: reverts at round 3)
+              //   divisor 25 → worst debit -428,645 after 5 presses → ok
+              //                (press+round interleaved: reverts at round 6)
+              // 25 keeps the hosted demo runnable for a visitor session; the
+              // structural cure (collateral-aware scale / submit preflight)
+              // is tracked separately. Anvil is 20/hub — no scaling needed.
+              amountDivisor: mode === "anvil" ? 1n : 25n,
               startNonce: nonces,
             });
             for (const iou of batch) {
               coordinator.addIous([iou]);
               await new Promise((r) => setTimeout(r, 120)); // visible streaming
             }
+          } catch (e) {
+            // Fire-and-forget: an unhandled rejection here would take the
+            // hosted process down. Log server-side, never on the wire.
+            console.error("[demo] /simulate burst failed", e);
           } finally {
             simulating = false;
           }
@@ -174,9 +193,13 @@ const server = createServer(async (req, res) => {
     res.writeHead(404);
     res.end("not found");
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
+    // E-CR-01: transport errors carry the token-bearing ARC_RPC_URL in their
+    // message (viem embeds the full request URL). Full detail stays in the
+    // server log, correlated by id; the wire gets the redacted form only.
+    const id = randomUUID();
+    console.error(`[demo] request failed (${id}) ${req.method} ${req.url}`, e);
     res.writeHead(500, { "content-type": "application/json" });
-    res.end(JSON.stringify({ error: msg }));
+    res.end(JSON.stringify({ error: redactedMessage(e), id }));
   }
 });
 

@@ -200,7 +200,13 @@ async function poll() {
       "failed": "❌ " + (s.lastError ?? "failed"),
     };
     const cd = cooldownNote && Date.now() < cooldownNote.until ? cooldownNote.text + " · " : "";
-    $("phase").innerHTML = cd + (s.simulating ? "🌀 traffic streaming… " : "") + (phases[s.phase] ?? "");
+    const line = cd + (s.simulating ? "🌀 traffic streaming… " : "") + (phases[s.phase] ?? "");
+    // The "failed" line is the only branch carrying a server-derived error
+    // string — render it as text, never as markup (latent DOM-XSS sink,
+    // audit E-CR-02). Every other branch is a fixed template (the ArcScan
+    // anchor on "confirmed" needs innerHTML).
+    if (s.phase === "failed") $("phase").textContent = line;
+    else $("phase").innerHTML = line;
   } catch (e) { $("phase").textContent = "⚠ server unreachable"; }
 }
 

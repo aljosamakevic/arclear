@@ -12,6 +12,7 @@ import { HubClient, MAX_LOG_SCAN_SPAN, scanWindows } from "../src/client.js";
 import { clearingHubV2Abi } from "../src/abi/ClearingHubV2.js";
 import type { NetResult, RoundProposal, SignedIou } from "../src/types.js";
 import type { AgentPersona } from "./agents.js";
+import { redactSensitive } from "./redact.js";
 
 export type RoundPhase =
   | "idle"
@@ -444,7 +445,12 @@ export class Coordinator {
    * source of redemption truth (D-09).
    */
   private async reconcileRedeemedIds(): Promise<void> {
-    const tip = await this.pub.getBlockNumber();
+    // cacheTime: 0 — viem's 4 s getBlockNumber cache would make `tip` an
+    // UPPER scan bound in the past, so a redemption mined seconds ago is
+    // missed, its id survives into the next proposal, and the round reverts
+    // NullifiedIdInManifest (safe on-chain, wasted round + relayer gas).
+    // Same defect class as E-CR-03 in fetchManifest.
+    const tip = await this.pub.getBlockNumber({ cacheTime: 0 });
     // Windowed scan: live Arc providers cap per-request log spans (and prune
     // genesis history), and the first scan of a session starts back at the
     // hub's deploy block. Later scans resume near the tip → single window.
@@ -612,6 +618,9 @@ export class Coordinator {
         // WR-01: record the in-flight submission BEFORE broadcasting, so a
         // receipt-transport failure is reconciled on the next round instead of
         // silently re-netting (and re-settling) the same paper.
+        // Cached tip is fine here (unlike the two scan UPPER bounds): this is
+        // a LOWER bound for the reconciliation scan, so staleness can only
+        // widen the range — never hide a RoundExecuted log.
         const sentAtBlock = await this.pub.getBlockNumber();
         this.pendingSubmission = {
           roundNonce: proposal.roundNonce,
@@ -710,13 +719,19 @@ export class Coordinator {
       // Pitfall 4: a concurrent round advanced the nonce between passes —
       // expected protocol behavior, not a fault. Next round is a fresh pass 1.
       // The marker is produced by submit's own chain-state check (WR-02).
+      // Classify on the RAW message, then redact — every string below this
+      // point is served to unauthenticated callers (E-CR-02).
       if (msg.includes("WrongRoundNonce")) {
         this.phase = "aborted";
         this.phaseDetail = "stale roundNonce — a concurrent round executed";
-        return { outcome: "aborted", reason: msg, excluded: [], passCount: 0 };
+        return { outcome: "aborted", reason: redactSensitive(msg), excluded: [], passCount: 0 };
       }
       this.phase = "failed";
-      this.lastError = msg;
+      // E-CR-02: `lastError` is durable state served by GET /state and painted
+      // by every open dashboard. A raw viem transport error carries the
+      // token-bearing RPC URL — the field must never hold one. The caller
+      // still gets the unredacted Error (the server logs it privately).
+      this.lastError = redactSensitive(msg);
       throw e;
     }
   }
@@ -746,7 +761,13 @@ export class Coordinator {
     return {
       phase: this.phase,
       phaseDetail: this.phaseDetail,
-      lastError: this.lastError,
+      // Second, independent application of the sanitizer at the actual wire
+      // boundary (E-CR-02). `lastError` is already redacted at assignment;
+      // redactSensitive is idempotent, so this only guards a future writer.
+      // `phaseDetail` is deliberately NOT redacted: on a confirmed round it is
+      // the tx hash the dashboard turns into an ArcScan link, and it is only
+      // ever set from coordinator-constructed strings, never from a raw error.
+      lastError: this.lastError === undefined ? undefined : redactSensitive(this.lastError),
       agents: this.personas.map((p) => ({
         name: p.name,
         emoji: p.emoji,
