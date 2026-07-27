@@ -12,6 +12,7 @@ import { HubClient, MAX_LOG_SCAN_SPAN, scanWindows } from "../src/client.js";
 import { clearingHubV2Abi } from "../src/abi/ClearingHubV2.js";
 import type { NetResult, RoundProposal, SignedIou } from "../src/types.js";
 import type { AgentPersona } from "./agents.js";
+import { redactSensitive } from "./redact.js";
 
 export type RoundPhase =
   | "idle"
@@ -718,13 +719,19 @@ export class Coordinator {
       // Pitfall 4: a concurrent round advanced the nonce between passes —
       // expected protocol behavior, not a fault. Next round is a fresh pass 1.
       // The marker is produced by submit's own chain-state check (WR-02).
+      // Classify on the RAW message, then redact — every string below this
+      // point is served to unauthenticated callers (E-CR-02).
       if (msg.includes("WrongRoundNonce")) {
         this.phase = "aborted";
         this.phaseDetail = "stale roundNonce — a concurrent round executed";
-        return { outcome: "aborted", reason: msg, excluded: [], passCount: 0 };
+        return { outcome: "aborted", reason: redactSensitive(msg), excluded: [], passCount: 0 };
       }
       this.phase = "failed";
-      this.lastError = msg;
+      // E-CR-02: `lastError` is durable state served by GET /state and painted
+      // by every open dashboard. A raw viem transport error carries the
+      // token-bearing RPC URL — the field must never hold one. The caller
+      // still gets the unredacted Error (the server logs it privately).
+      this.lastError = redactSensitive(msg);
       throw e;
     }
   }
@@ -754,7 +761,13 @@ export class Coordinator {
     return {
       phase: this.phase,
       phaseDetail: this.phaseDetail,
-      lastError: this.lastError,
+      // Second, independent application of the sanitizer at the actual wire
+      // boundary (E-CR-02). `lastError` is already redacted at assignment;
+      // redactSensitive is idempotent, so this only guards a future writer.
+      // `phaseDetail` is deliberately NOT redacted: on a confirmed round it is
+      // the tx hash the dashboard turns into an ArcScan link, and it is only
+      // ever set from coordinator-constructed strings, never from a raw error.
+      lastError: this.lastError === undefined ? undefined : redactSensitive(this.lastError),
       agents: this.personas.map((p) => ({
         name: p.name,
         emoji: p.emoji,
