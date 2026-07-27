@@ -404,6 +404,13 @@ contract ClearingHubV2Test is RoundBuilderV2 {
     }
 
     // ------------------------------------------------------------------- gas
+    //
+    // These three points vary ONLY the manifest size at a hard-coded n=5, and
+    // gasleft() deltas exclude intrinsic gas — which is exactly how the SDK's
+    // per-participant coefficient came to be extrapolated from a term nobody
+    // had measured (B-CR-03). They are kept as the historical m-series;
+    // contracts/test/GasScaling.t.sol is the file that pins the client
+    // formula, across n AND with intrinsic gas included.
 
     /// Worst-case (fresh-state, all-cold) executeRound with n=5 participants
     /// and an m-id manifest; measured via gasleft() deltas around the call.

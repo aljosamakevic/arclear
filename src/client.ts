@@ -25,36 +25,78 @@ import type { Iou, PvPProposal, RoundProposal } from "./types.js";
 export { clearingHubAbi };
 
 /**
- * executeRound gas formula coefficients — from forge-measured gasleft() deltas
- * (plan 02-05, 2026-07-23, fresh-state worst case at n=5): m=10 → 329,108;
- * m=105 → 691,708; m=250 → 1,254,993. The formula carries ≥1.5x margin at
- * every measured point (1.70x / 1.63x / 1.59x). Explicit gas is mandatory on
- * Arc: USDC is the gas token, so estimation reserves the whole balance.
+ * executeRound gas formula coefficients — measured across PARTICIPANT COUNT,
+ * intrinsic gas included (contracts/test/GasScaling.t.sol; every point below
+ * is asserted there, so these constants cannot silently drift).
+ *
+ * B-CR-03: the previous coefficients (40,000/participant, 6,000/id) came from
+ * measurements that only ever varied `m` at n=5 — the per-participant term was
+ * never measured at all — and from `gasleft()` deltas, which EXCLUDE the
+ * 21,000 + 16/non-zero-calldata-byte a submitter actually pays. Both errors
+ * pushed the same way: at n=30/m=15 the old formula supplied 1,590,000 against
+ * 1,763,412 needed, i.e. a deterministic out-of-gas revert that burns
+ * USDC-denominated fees, for pool sizes docs/CALIBRATION.md explicitly
+ * analyzes (n = 15/30/50). Crossover was around n=16.
+ *
+ * Worst-case shape measured: one funded debtor plus n-1 fresh creditors, so
+ * every participant pays a 0 -> non-zero SSTORE for `collateral` AND
+ * `lastRound` (two 20,000-gas writes) on top of ecrecover and the event.
+ *
+ * | n  | m   | execution | intrinsic | total     | formula   | margin |
+ * |----|-----|-----------|-----------|-----------|-----------|--------|
+ * | 2  | 1   |   159,961 |    27,136 |   187,097 |   488,000 |  2.61x |
+ * | 5  | 3   |   324,033 |    34,112 |   358,145 |   774,000 |  2.16x |
+ * | 15 | 8   |   863,338 |    56,564 |   919,902 | 1,714,000 |  1.86x |
+ * | 30 | 15  | 1,673,516 |    89,896 | 1,763,412 | 3,120,000 |  1.77x |
+ * | 50 | 25  | 2,765,066 |   134,668 | 2,899,734 | 5,000,000 |  1.72x |
+ * | 5  | 105 |   714,417 |    86,192 |   800,609 | 1,590,000 |  1.99x |
+ * | 5  | 250 | 1,279,053 |   160,300 | 1,439,353 | 2,750,000 |  1.91x |
+ *
+ * Implied marginal costs: ~54,400 gas per participant and ~4,400 per id, both
+ * intrinsic-inclusive. Explicit gas is mandatory on Arc: USDC is the gas
+ * token, so estimation reserves the whole balance.
  */
 export const EXECUTE_ROUND_GAS_BASE = 300_000n;
-export const EXECUTE_ROUND_GAS_PER_PARTICIPANT = 40_000n;
-export const EXECUTE_ROUND_GAS_PER_ID = 6_000n;
+export const EXECUTE_ROUND_GAS_PER_PARTICIPANT = 90_000n;
+export const EXECUTE_ROUND_GAS_PER_ID = 8_000n;
 
 /**
  * redeemIOU flat gas limit — measured 199,604 with RING=16 fully populated by
- * 8-id manifests (forge snapshot, plan 02-05, 2026-07-23). 500,000 is 2.51x
- * that, covering demo-scale ~105-id manifests (~4 extra siblings per proof,
- * ≈ +40k total).
+ * 8-id manifests (forge snapshot, plan 02-05, 2026-07-23).
+ *
+ * B-WR-02: that measurement is a `gasleft()` delta and excludes intrinsic gas,
+ * so the old "500,000 is 2.51x" claim was intrinsic-blind. At demo-scale
+ * ~105-id manifests the sixteen bracketing proofs carry ~7 siblings each
+ * instead of 3 — several KB of near-all-non-zero calldata — and the true
+ * margin is far smaller (the audit derives ≈1.35x). Still covered on the
+ * deployed RING=16 hubs, but this constant has NOT been re-measured at demo
+ * scale: treat 500,000 as covered-but-not-comfortable until it is.
  */
 export const REDEEM_IOU_GAS = 500_000n;
 
 /**
- * executePvP gas formula coefficients — from forge-measured gasleft() deltas
- * (plan 04-04, 2026-07-24, fresh-state worst case): n=3+3/m=10+10/union=4 →
- * 563,814; n=5+5/m=105+105/union=5 (demo scale) → 1,734,897. The two legs
- * reuse the plan 02-05 executeRound coefficients; these constants cover the
- * router's own overhead (leg calldata, 2x hashRound recomputation, union
- * merge + ECDSA recovers). Formula at the demo-scale point:
- * 350,000 + 2*300,000 + 40,000*10 + 6,000*210 + 15,000*5 = 2,685,000
- * = 1.55x measured 1,734,897 (small point: 1,370,000 = 2.43x measured
- * 563,814) — >=1.5x margin at every measured point. Explicit gas is
- * mandatory on Arc: USDC is the gas token, so estimation reserves the whole
- * balance.
+ * executePvP gas formula coefficients — the two legs reuse the executeRound
+ * coefficients above, so B-WR-01's under-provisioning (~1.0x margin at n=30
+ * per leg, uncovered from n≥40) was entirely inherited from B-CR-03 and is
+ * fixed by the corrected leg terms. These two constants cover the router's own
+ * overhead: leg calldata, 2x hashRound recomputation, the union merge, and one
+ * ECDSA recover per union member. Measured router-attributable execution is
+ * ~298,000 at n=30 and ~525,000 at n=50 per bundle — the growth is per-union-
+ * member and is what PVP_GAS_PER_UNION_SIG pays for, so the fixed base did not
+ * need to move.
+ *
+ * Measured, intrinsic included (contracts/test/GasScaling.t.sol, both legs
+ * over the same n participants so union = n):
+ *
+ * | n/leg | m/leg | execution | intrinsic | total     | formula    | margin |
+ * |-------|-------|-----------|-----------|-----------|------------|--------|
+ * | 3     | 10    |   559,152 |    52,692 |   611,844 |  1,695,000 |  2.77x |
+ * | 5     | 105   | 1,779,054 |   160,488 | 1,939,542 |  3,605,000 |  1.86x |
+ * | 30    | 15    | 3,645,115 |   204,332 | 3,849,447 |  7,040,000 |  1.83x |
+ * | 50    | 25    | 6,054,934 |   322,900 | 6,377,834 | 11,100,000 |  1.74x |
+ *
+ * Explicit gas is mandatory on Arc: USDC is the gas token, so estimation
+ * reserves the whole balance.
  */
 export const PVP_ROUTER_GAS_BASE = 350_000n;
 export const PVP_GAS_PER_UNION_SIG = 15_000n;
