@@ -5,7 +5,7 @@ any ERC-20 on [Arc](https://arc.network).** 100 micropayments, 1 settlement:
 parties accumulate signed EIP-712 IOUs off-chain (a tab, with a limit), then
 settle only the **net** residual from pre-posted collateral — atomically, under
 consent, in one transaction. It moves working capital from turnover-sized to
-exposure-sized: the reason DTCC and CLS exist, as a ~250-line contract you
+exposure-sized: the reason DTCC and CLS exist, as a 181-line contract you
 deploy.
 
 ```
@@ -126,8 +126,12 @@ Roles](docs/PROTOCOL.md#roles); more vocabulary in
   keys and cannot forge consent; every participant recomputes the netting
   before signing; the chain enforces zero-sum. Withdrawal is never pausable.
 - **Bounded, backed credit.** Bilateral caps bound worst-case loss per
-  counterparty; a debtor's posted collateral backs their IOUs; `redeemIOU`
-  gives a collateralized recovery path if a member goes dark.
+  counterparty; a debtor's posted collateral backs their IOUs. `redeemIOU`
+  adds a collateralized recovery path if a member goes dark — but on the
+  **currently deployed** hubs it can be permanently disabled by any party for
+  a few hundred thousand gas, so size exposure on caps + collateral alone
+  ([THREAT-MODEL.md](docs/THREAT-MODEL.md) rows 28/29). Settlement safety and
+  zero-sum are unaffected.
 - **Composable.** Net through Arclear, settle the residual over whatever rail
   you like — including Gateway. Different compression axes; they stack.
 - **Legible & tested.** Deterministic netting engine with a published spec
@@ -135,7 +139,7 @@ Roles](docs/PROTOCOL.md#roles); more vocabulary in
 
 ## What's in the box
 
-- **[`ClearingHub.sol`](contracts/src/ClearingHub.sol)** (~250 lines, Foundry) —
+- **[`ClearingHub.sol`](contracts/src/ClearingHub.sol)** (181 lines, Foundry) —
   collateral vault + atomic round settlement. Unanimous EIP-712 consent over a
   single shared digest of the full position set; strictly-ascending participant
   canonicalization; zero-sum enforcement; per-round manifest commitment; pause
@@ -150,8 +154,12 @@ Roles](docs/PROTOCOL.md#roles); more vocabulary in
   public calldata — no coordinator trust) and recovers the amount straight
   from the debtor's posted collateral; a nullifier guarantees the redeemed
   IOU can never net again. Best-effort by design — it races the
-  never-pausable `withdraw`; spec and honesty notes in
-  [PROTOCOL.md](docs/PROTOCOL.md).
+  never-pausable `withdraw` — and **known-broken on the deployed hubs**: two
+  audit findings let any party disable redemption permanently, per-IOU or
+  hub-wide, for a few hundred thousand gas. The fix is a contract revision;
+  until then treat recovery as worth zero when sizing credit. Spec, measured
+  costs and honesty notes in
+  [PROTOCOL.md → Known-broken on the deployed hubs](docs/PROTOCOL.md).
 - **[`src/`](src/) — the TypeScript SDK** (viem-only): EIP-712 IOU + consent
   signing ([iou.ts](src/iou.ts), [round.ts](src/round.ts)), the deterministic
   netting engine ([netting.ts](src/netting.ts), spec in
@@ -196,18 +204,50 @@ Arc Testnet: copy `.env.example` → `.env`, set `ARC_RPC_URL`, `DEPLOYER_PK`
 (fund it at [faucet.circle.com](https://faucet.circle.com/) — on Arc, USDC is
 the native gas token with a 6-decimal ERC-20 facade at
 `0x3600000000000000000000000000000000000000`, so one faucet drip covers both
-gas and collateral), and `AGENT_MNEMONIC`. Set `HUB_V2_DEPLOY_BLOCK` (your V2
-USDC hub's deploy block, decimal) — the public RPC prunes old history, so
-event scans need a floor. Then:
+gas and collateral), and `AGENT_MNEMONIC`.
+
+You can skip deploying entirely and point `.env` at the already-live hubs in
+[Deployed hubs](#deployed-hubs-arc-testnet-chain-5042002) below. To deploy
+your own, the demo needs **three** contracts — a `ClearingHubV2` per token
+plus the `PvPRouter` that binds them (`demo/setup.ts` requires all three and
+refuses to start otherwise):
 
 ```bash
+# 1. V2 USDC hub  (K=3 / RING=16 / L=86400 defaults — all UNCALIBRATED;
+#    override with HUB_K / HUB_RING / HUB_MAX_IOU_LIFETIME)
 TOKEN_ADDRESS=0x3600000000000000000000000000000000000000 \
-forge script contracts/script/Deploy.s.sol --root contracts \
+forge script contracts/script/DeployV2.s.sol --root contracts \
   --rpc-url "$ARC_RPC_URL" --private-key "$DEPLOYER_PK" \
   --broadcast --with-gas-price 25gwei
-# put the printed address into .env as HUB_USDC, then:
+
+# 2. V2 EURC hub (same bytecode, different token)
+TOKEN_ADDRESS=0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a \
+forge script contracts/script/DeployV2.s.sol --root contracts \
+  --rpc-url "$ARC_RPC_URL" --private-key "$DEPLOYER_PK" \
+  --broadcast --with-gas-price 25gwei
+
+# 3. Put both printed addresses into .env as HUB_V2_USDC / HUB_V2_EURC,
+#    then deploy the router that pins them as constructor immutables
+HUB_V2_USDC=0x… HUB_V2_EURC=0x… \
+forge script contracts/script/DeployPvPRouter.s.sol --root contracts \
+  --rpc-url "$ARC_RPC_URL" --private-key "$DEPLOYER_PK" \
+  --broadcast --with-gas-price 25gwei
+```
+
+Then finish `.env`: `PVP_ROUTER` (the printed router address) and
+`HUB_V2_DEPLOY_BLOCK` (your **V2 USDC** hub's deploy block, decimal — the
+public RPC prunes old history, so event scans need a floor; it is printed in
+`contracts/broadcast/DeployV2.s.sol/5042002/`). Now:
+
+```bash
 npm run e2e:testnet        # or: npm run demo (dashboard against testnet)
 ```
+
+> `HUB_USDC` / `HUB_EURC` in `.env.example` are the **v1** `ClearingHub`
+> addresses, kept as a record of the still-live Arclear Net v1 deployment.
+> Nothing in `src/`, `demo/` or `contracts/` reads them, and
+> `contracts/script/Deploy.s.sol` (which deploys v1) is not part of this
+> path — the demo has run on `ClearingHubV2` since Phase 1.
 
 ### Deployed hubs (Arc Testnet, chain 5042002)
 
@@ -384,8 +424,9 @@ In order, per the sweep data:
 
 ## For Arc Open Source Showcase reviewers
 
-**What primitives does this expose?** A forkable clearing layer: a ~250-line
-collateral-and-settlement contract, a deterministic netting engine with a
+**What primitives does this expose?** A forkable clearing layer: a 181-line
+collateral-and-settlement contract (430 lines with the v2 extensions in
+`ClearingHubV2`, plus a 247-line `PvPRouter`), a deterministic netting engine with a
 published spec third parties can re-implement, EIP-712 IOU/consent schemas,
 credit-cap tracking, and a reference coordinator + dashboard. Each piece is
 importable on its own.

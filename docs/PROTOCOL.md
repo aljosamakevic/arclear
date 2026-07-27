@@ -316,8 +316,9 @@ reproduce these rules exactly:
 > 6962's largest-power-of-two split: a third party implementing the RFC's
 > split rule will produce different roots for every non-power-of-two leaf
 > count and diverge from this protocol. Under level-wise promotion the tree
-> shape is uniquely determined by the leaf count — the fact the
-> position-binding argument below rests on.
+> shape is uniquely determined by the leaf count — but note that the converse
+> does **not** hold, and the position-binding argument below does not rest on
+> it: a *verified* proof does not authenticate the `leafCount` it claims.
 
 ### Proof encodings
 
@@ -354,28 +355,55 @@ branch:
 ### Position-binding soundness
 
 Why can a prover not lie about `index` or `leafCount` to fake a bracketing
-claim (e.g. claim a non-last leaf is the last)? Because the sibling
-**consumption schedule** — at which levels a sibling is consumed and on which
-side — is completely determined by `(index, leafCount)`. Lying about either
-changes the schedule: the walk feeds different byte strings into keccak at
-some level, so reaching the true root would require a keccak256 second
-preimage. The one subtle case — shrinking `leafCount` to claim a non-last
-leaf is last — fails because the true tree pairs that node as a left child
-somewhere, while the fake path promotes it (or pairs it right); the inputs
-diverge and the roots mismatch. This argument is adversarially
+claim (e.g. claim a non-last leaf is the last)? **Not** because `leafCount`
+is bound by the root — it is not, and stating otherwise is the easy mistake
+here. What verification binds is the sibling **consumption schedule**: the
+sequence of levels at which a sibling is consumed and on which side. That
+schedule is determined by `(index, leafCount)`, and reaching a genuine root
+from a genuine leaf hash requires replaying that leaf's own schedule with
+that leaf's own siblings — any lie that *changes* the schedule feeds
+different byte strings into keccak and would need a keccak256 second
+preimage.
+
+But many `(index, leafCount)` pairs share one schedule, so a lie that
+*preserves* it verifies. Enumerating every `(index, leafCount)` for leaf
+counts up to 64 yields 127 distinct schedules, of which **123 are shared
+across two or more different leaf counts** — e.g. a genuine 4-leaf root
+verifies a proof claiming `leafCount = 3`, at index 0 (schedule `R,R`) and at
+index 1 (schedule `L,R`) alike.
+
+Non-inclusion is nevertheless sound, and this is where the real argument
+lives — in the **kind-specific position checks**, not in `leafCount`:
+
+- **BelowFirst** forces the claimed index to 0. The schedule of index 0 is a
+  right-consumption at every level, and the only real leaf whose schedule is
+  all right-consumptions is leaf 0 (any nonzero index has an odd bit at some
+  level, which consumes on the left). So the anchor is genuinely the first
+  leaf, and `id < a.leaf` really does place `id` below the whole manifest.
+- **AboveLast** forces the claimed index to `leafCount − 1`. The last leaf is
+  the last node at every level, so its schedule mixes only left-consumptions
+  and promotions and **never** contains a right-consumption; conversely, once
+  a walk is at a non-last index it stays non-last, so every non-last real
+  leaf's schedule ends in a right-consumption at the final `w == 2` level.
+  The two sets are disjoint, so no non-last leaf can be re-anchored as last.
+- **Bracket** forces one shared claimed `leafCount` and consecutive claimed
+  indices, which pins the two anchors to a genuinely adjacent pair.
+
+Exhaustively enumerated: over all real manifests of n ≤ 64 leaves, against
+claimed leaf counts up to 4096 (BelowFirst/AboveLast) and 256 (Bracket),
+there are **zero** candidate forgeries of any kind — no member id can be made
+to prove its own non-inclusion. The property is also adversarially
 property-tested on both sides: random `index`/`leafCount` perturbations and
 sibling tampering must be rejected (fast-check in `test/merkle.test.ts`,
 512-run fuzz in `contracts/test/ClearingHubV2.t.sol`).
 
-One measured nuance (from the fuzz campaign): verification binds the
-**schedule**, not the literal `leafCount`. Certain leafCount lies are
-schedule-equivalent — e.g. claiming leafCount 4 instead of 3 for the leaf at
-index 0 consumes siblings identically and verifies in isolation. This is
-harmless for non-inclusion soundness because every branch adds
-kind-specific position checks (`index == 0`, `index == leafCount − 1`, equal
-leafCounts + adjacency) that reject every such lie in the shapes `redeemIOU`
-accepts — but implementers should not treat a verified inclusion proof's
-`leafCount` as an authenticated manifest size on its own.
+**Implementer's warning.** Because the argument rests on the position checks
+and not on `leafCount`, a verified inclusion proof's `leafCount` is **not** an
+authenticated manifest size — do not read it as one. Adding a new
+`NonInclusionKind` re-opens this question from scratch: it must come with its
+own disjointness argument over schedules, and the existing tests will not
+catch its absence. If `leafCount` is ever needed as a trusted value, commit
+it into the root (e.g. `root' = keccak256(0x02 ‖ root ‖ leafCount)`).
 
 ## IOU redemption
 
@@ -461,8 +489,13 @@ pass honestly. The rule that prevents it needs no new signed field:
   expiry.
 - **Therefore:** when `executedAt(oldest buffered) < expiry − L`, every
   round that could possibly have consumed the IOU is still buffered, and the
-  full proof set is complete — **net → cannot-redeem holds unconditionally
-  for any IOU signed under the convention**.
+  full proof set is complete — **net → cannot-redeem holds for any IOU signed
+  under the convention**. Note the direction: this argues that a *netted* IOU
+  cannot also be redeemed. It does **not** argue the converse, and the
+  converse is false on the deployed hubs — an id can be a leaf of a buffered
+  root without ever having been netted, because `executeRound` never binds a
+  consumed id to the round's participants (see "Known-broken on the deployed
+  hubs" below).
 - **Incentive-safe against violation:** only the debtor signs IOUs, and
   double-claiming only debits the debtor — a debtor who signs
   `expiry > signTime + L` weakens *only their own* double-claim protection.
@@ -487,6 +520,64 @@ both directions (and invariant-tested on real chain state):
 - **Net → cannot-redeem:** a consumed id is a leaf of some buffered root, so
   its non-inclusion proof against that root cannot exist; the coverage rule
   guarantees the containing round is still buffered for honest debtors.
+  **This is one-way only.** "Leaf of a buffered root" does *not* imply "was
+  actually netted": nothing on-chain ties a `consumedIds` entry to the round's
+  participants, so an id can be made unredeemable without ever having settled.
+  Read the next section before treating redemption as a bound on exposure.
+
+### Known-broken on the deployed hubs
+
+Two defects found in the 2026-07-27 audit make `redeemIOU` **defeatable by any
+party, permanently, for a few hundred thousand gas** on the live
+`ClearingHubV2` deployments. Both were reproduced against the shipped
+contract. Neither can be fixed off-chain — no SDK, coordinator or ops change
+restores redemption — so they are stated here rather than worked around.
+
+**What is NOT affected, stated first so this is not misread as a safety
+break:** settlement safety, zero-sum, and the signed-consent invariant are
+untouched. No balance moves without that address's EIP-712 signature over the
+exact executed `(nonce, participants, deltas, root)` tuple; both attacks
+execute rounds in which every delta is zero and every participant signed. The
+damage is confined to the recovery product.
+
+1. **`consumedIds` is unbound (manifest poisoning).** `executeRound` commits
+   the merkle root of `consumedIds` but never checks that a consumed id has
+   anything to do with the round's participants — no debtor/creditor
+   recovery, no ownership binding, no consumption ledger. The only constraints
+   are strict ascent and "not already redeemed". And a round is **free**:
+   `n = 2` with `deltas = [0, 0]` sums to zero and takes the `delta >= 0`
+   branch, so neither address needs a base unit of collateral, and no IOU has
+   to exist. Two throwaway addresses can therefore commit any id. Since
+   `redeemIOU` demands a non-inclusion proof against every buffered root, and
+   no such proof exists for a genuine leaf, **writing a victim's IOU id into
+   any round's manifest permanently destroys that IOU's redeemability.** The
+   debtor is the natural attacker — they know every id they ever signed, and
+   one transaction covers all of them. Measured (`gasleft()` deltas,
+   excluding the ~21k intrinsic tx cost): **136,762 gas** for a first free
+   round with an empty manifest, **~3,808 gas per additional poisoned id**.
+2. **Free rounds flush the root ring.** Every `executeRound` unconditionally
+   writes `rootRing[nonce % RING] = (root, nonce, block.timestamp)` and
+   increments `roundNonce`. The coverage gate reverts when
+   `oldestExecutedAt >= expiry − L`; `oldestExecutedAt` only ever rises while
+   `expiry − L` is fixed by the IOU. So an attacker who rewrites all `RING`
+   slots closes the window **permanently** — verified still reverting after
+   warping seven days forward and regenerating proofs. This one is global: a
+   party with no relationship to anyone kills redemption for *every*
+   outstanding IOU on that hub, against *every* debtor, at once. Measured:
+   **1,053,610 gas** to flush all 16 slots (~65.9k per round). It survives a
+   fix to (1) — it attacks the ring, not the manifest.
+
+**Consequence for integrators, plainly: on the currently deployed hubs, size
+credit exposure on bilateral credit caps plus the debtor's posted collateral
+alone. Treat `redeemIOU` as worth zero.**
+
+The fixes are on-chain and land in the next deploy. Binding each consumed id
+to a listed participant addresses (1); making rounds non-free *and*
+time-indexing the ring addresses (2). Replacing the merkle commitment with a
+real on-chain consumption ledger (`mapping(bytes32 => bool) consumed`, checked
+directly by `redeemIOU`) addresses both and removes the ring, the coverage
+rule and the whole non-inclusion surface — at the cost of one `SSTORE` per
+consumed id.
 
 ### Honest limitations
 
