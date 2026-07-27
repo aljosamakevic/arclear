@@ -222,7 +222,22 @@ export class HubClient {
     // earliestBlock (hub deploy block on live Arc) floors the scan — the
     // public RPC rejects from-genesis ranges as pruned history — and the
     // range is windowed because live providers also cap per-request spans.
-    const latest = await this.pub.getBlockNumber();
+    //
+    // cacheTime: 0 is load-bearing. viem caches getBlockNumber for `cacheTime`
+    // ms, defaulting to pollingInterval = 4,000 — so a round mined in the last
+    // 4 s falls OUTSIDE [earliestBlock, latest], the scan returns no logs, and
+    // this throws for a round that provably executed. Measured: 2 of 5 clean
+    // `npm run e2e:anvil` runs failed in prepareRedemptionProofs this way
+    // (audit 2026-07-27, E-CR-03). Any scan BOUND must read the true tip.
+    const latest = await this.pub.getBlockNumber({ cacheTime: 0 });
+    if (this.earliestBlock > latest) {
+      // scanWindows would return [] and the empty-logs branch below would
+      // blame the round. Name the real cause: a mis-set deploy block.
+      throw new Error(
+        `earliestBlock ${this.earliestBlock} is past the chain tip ${latest} — ` +
+          `check HUB_V2_DEPLOY_BLOCK for hub ${this.hub}`,
+      );
+    }
     const logs = [];
     for (const [fromBlock, toBlock] of scanWindows(this.earliestBlock, latest, MAX_LOG_SCAN_SPAN)) {
       logs.push(

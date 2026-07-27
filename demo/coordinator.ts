@@ -444,7 +444,12 @@ export class Coordinator {
    * source of redemption truth (D-09).
    */
   private async reconcileRedeemedIds(): Promise<void> {
-    const tip = await this.pub.getBlockNumber();
+    // cacheTime: 0 — viem's 4 s getBlockNumber cache would make `tip` an
+    // UPPER scan bound in the past, so a redemption mined seconds ago is
+    // missed, its id survives into the next proposal, and the round reverts
+    // NullifiedIdInManifest (safe on-chain, wasted round + relayer gas).
+    // Same defect class as E-CR-03 in fetchManifest.
+    const tip = await this.pub.getBlockNumber({ cacheTime: 0 });
     // Windowed scan: live Arc providers cap per-request log spans (and prune
     // genesis history), and the first scan of a session starts back at the
     // hub's deploy block. Later scans resume near the tip → single window.
@@ -612,6 +617,9 @@ export class Coordinator {
         // WR-01: record the in-flight submission BEFORE broadcasting, so a
         // receipt-transport failure is reconciled on the next round instead of
         // silently re-netting (and re-settling) the same paper.
+        // Cached tip is fine here (unlike the two scan UPPER bounds): this is
+        // a LOWER bound for the reconciliation scan, so staleness can only
+        // widen the range — never hide a RoundExecuted log.
         const sentAtBlock = await this.pub.getBlockNumber();
         this.pendingSubmission = {
           roundNonce: proposal.roundNonce,
