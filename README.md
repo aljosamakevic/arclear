@@ -43,14 +43,9 @@ The dashboard and protocol code are identical in both; the difference is real:
 the sandbox settles on a throwaway chain, the testnet view spends actual
 (faucet) USDC on actual blocks.
 
-> **Both hosted apps are currently serving a pre-V3 image** — the testnet view's
-> `/state` reports the V2 USDC hub `0x3b9a…5a16`, not the current V3 hub. They
-> are pending a Fly redeploy plus a secrets update (`HUB_V3_USDC`,
-> `HUB_V3_EURC`, `PVP_ROUTER_V3`, `HUB_V3_DEPLOY_BLOCK`). Until that lands, the
-> hosted views demonstrate v2 behaviour. Everything else in this README —
-> `main`, the SDK, the local demo, and the [live V3 transactions
-> below](#deployed-hubs-arc-testnet-chain-5042002) — is V3. Run
-> `npm run demo -- --anvil` or `npm run e2e:testnet` locally for the V3 flow.
+Both hosted views run **V3**: the testnet view's `/state` reports the current
+V3 USDC hub `0xfe96…C1ad`, and its rounds settle through the V3 consumption
+ledger.
 
 ## Why this exists
 
