@@ -5,7 +5,7 @@ any ERC-20 on [Arc](https://arc.network).** 100 micropayments, 1 settlement:
 parties accumulate signed EIP-712 IOUs off-chain (a tab, with a limit), then
 settle only the **net** residual from pre-posted collateral — atomically, under
 consent, in one transaction. It moves working capital from turnover-sized to
-exposure-sized: the reason DTCC and CLS exist, as a 181-line contract you
+exposure-sized: the reason DTCC and CLS exist, as a single contract you
 deploy.
 
 ```
@@ -34,7 +34,7 @@ resets on restart — press every button freely.
 
 **[arclear-demo-testnet.fly.dev](https://arclear-demo-testnet.fly.dev)** — the
 **live Arc Testnet** version. Same buttons, but every netting round is a real
-settlement on chain 5042002, paid from faucet funds, against the deployed V2
+settlement on chain 5042002, paid from faucet funds, against the deployed V3
 hubs listed under [Deployed
 hubs](#deployed-hubs-arc-testnet-chain-5042002) below — each round's tx hash
 links straight to [arcscan](https://testnet.arcscan.app). Button presses are
@@ -60,7 +60,7 @@ Netting fixes that other axis. Obligations accumulate off-chain as signed IOUs
 and settles only residuals from pre-posted collateral. Working capital drops
 from turnover-sized to exposure-sized — the reason DTCC and CLS exist. And a
 hub clears **any ERC-20**: deploy one for USDC, one for EURC. Netting
-compresses obligations *within* a token; the `PvPRouter` composes two hubs
+compresses obligations *within* a token; the `PvPRouterV3` composes two hubs
 *across* tokens — USDC and EURC legs settling atomically in one transaction,
 a miniature CLS.
 
@@ -127,11 +127,14 @@ Roles](docs/PROTOCOL.md#roles); more vocabulary in
   before signing; the chain enforces zero-sum. Withdrawal is never pausable.
 - **Bounded, backed credit.** Bilateral caps bound worst-case loss per
   counterparty; a debtor's posted collateral backs their IOUs. `redeemIOU`
-  adds a collateralized recovery path if a member goes dark — but on the
-  **currently deployed** hubs it can be permanently disabled by any party for
-  a few hundred thousand gas, so size exposure on caps + collateral alone
-  ([THREAT-MODEL.md](docs/THREAT-MODEL.md) rows 28/29). Settlement safety and
-  zero-sum are unaffected.
+  adds a collateralized recovery path if a member goes dark: on the current
+  **V3** hubs, eligibility is one permanent on-chain read that no third party
+  can manufacture or erode. Still best-effort in one respect by design — it
+  races the never-pausable `withdraw`, so it recovers posted, still-present
+  collateral only. (On the superseded but still-deployed **V2** hubs it can be
+  permanently disabled by any party for a few hundred thousand gas — size
+  exposure there on caps + collateral alone;
+  [THREAT-MODEL.md](docs/THREAT-MODEL.md) rows 28/29.)
 - **Composable.** Net through Arclear, settle the residual over whatever rail
   you like — including Gateway. Different compression axes; they stack.
 - **Legible & tested.** Deterministic netting engine with a published spec
@@ -139,36 +142,43 @@ Roles](docs/PROTOCOL.md#roles); more vocabulary in
 
 ## What's in the box
 
-- **[`ClearingHub.sol`](contracts/src/ClearingHub.sol)** (181 lines, Foundry) —
-  collateral vault + atomic round settlement. Unanimous EIP-712 consent over a
-  single shared digest of the full position set; strictly-ascending participant
-  canonicalization; zero-sum enforcement; per-round manifest commitment; pause
-  that can never trap funds. Extended by **`ClearingHubV2`** (threshold
-  consent, merkle manifests, on-chain redemption) and the stateless
-  **`PvPRouter`** for atomic cross-currency settlement. **101 Foundry tests:
-  unit + revert matrix + 512-run fuzz + cross-stack digest/merkle parity.**
-- **IOU redemption (`ClearingHubV2`)** — the collateralized recovery path:
+- **[`ClearingHubV3.sol`](contracts/src/ClearingHubV3.sol)** (599 lines,
+  Foundry) — the current hub: collateral vault + atomic round settlement.
+  Unanimous EIP-712 consent over a single shared digest of the full position
+  set; strictly-ascending participant canonicalization; zero-sum enforcement;
+  **party-bound merkle manifest commitment**; a **permanent on-chain
+  consumption ledger**; pause that can never trap funds. Paired with the
+  stateless **[`PvPRouterV3`](contracts/src/PvPRouterV3.sol)** (410 lines) for
+  atomic cross-currency settlement. Its ancestors
+  [`ClearingHub`](contracts/src/ClearingHub.sol) (181 lines, v1) and
+  [`ClearingHubV2`](contracts/src/ClearingHubV2.sol) (430 lines) stay deployed
+  and stay in-tree. **241 Foundry tests: unit + revert matrix + 512-run fuzz +
+  cross-stack digest/merkle parity + PoC suite for the two audit findings.**
+- **IOU redemption (`ClearingHubV3`)** — the collateralized recovery path:
   when a debtor goes dark past K executed rounds, their creditor calls
-  `redeemIOU` with the debtor's existing EIP-712 IOU signature plus merkle
-  non-inclusion proofs against every buffered round root (rebuilt from
-  public calldata — no coordinator trust) and recovers the amount straight
-  from the debtor's posted collateral; a nullifier guarantees the redeemed
-  IOU can never net again. Best-effort by design — it races the
-  never-pausable `withdraw` — and **known-broken on the deployed hubs**: two
-  audit findings let any party disable redemption permanently, per-IOU or
-  hub-wide, for a few hundred thousand gas. The fix is a contract revision;
-  until then treat recovery as worth zero when sizing credit. Spec, measured
-  costs and honesty notes in
-  [PROTOCOL.md → Known-broken on the deployed hubs](docs/PROTOCOL.md).
+  `redeemIOU(iou, sig)` with the debtor's existing EIP-712 IOU signature —
+  **no proofs** — and recovers the amount straight from the debtor's posted
+  collateral; a nullifier guarantees the redeemed IOU can never net again.
+  Eligibility is a single permanent `consumed[leafId]` read: **O(1),
+  history-independent, and unforgeable by third parties**, because the ledger
+  is keyed on a leaf that binds the obligation to both its parties, and both
+  must sign the round that writes it. Still best-effort in one respect by
+  design — it races the never-pausable `withdraw`, so it recovers posted,
+  still-present collateral only. This is a redesign, not the original: a
+  full-repo audit found two ways any party could permanently destroy V2's
+  redemption for a few hundred thousand gas. That story, the fix, and what it
+  cost in gas are in [PROTOCOL.md → What V3 fixed, and what is still live on
+  the V2 hubs](docs/PROTOCOL.md#what-v3-fixed-and-what-is-still-live-on-the-v2-hubs).
 - **[`src/`](src/) — the TypeScript SDK** (viem-only): EIP-712 IOU + consent
   signing ([iou.ts](src/iou.ts), [round.ts](src/round.ts)), the deterministic
   netting engine ([netting.ts](src/netting.ts), spec in
   [PROTOCOL.md](docs/PROTOCOL.md)), bilateral credit caps
   ([creditCap.ts](src/creditCap.ts)), typed contract client
   ([client.ts](src/client.ts)), plus the merkle manifest library, PvP consent
-  layer, and exclusion-aware sweep model. **120 TypeScript tests (vitest +
+  layer, and exclusion-aware sweep model. **184 TypeScript tests (vitest +
   fast-check): zero-sum, shuffle-determinism, dedup idempotence, merkle
-  byte-parity, PvP digest parity, and exact-match coordinator cross-validation.**
+  byte-parity, PvP digest parity, id/leaf-derivation refusals, verification
+  totality, and exact-match coordinator cross-validation.**
 - **[`demo/`](demo/)** — a 5-agent service economy (crawler → summarizer →
   oracle → trader → auditor) that signs ~100 IOUs and settles them in one
   round, on local anvil or Arc Testnet, with a zero-dependency live
@@ -187,10 +197,17 @@ sign → net → consent → settle flow in runnable code, ~15 minutes.
 ```bash
 git clone <this repo> && cd arclear
 npm install
-cd contracts && forge install && forge test && cd ..   # 101 Foundry tests
-npm test                                               # 120 TypeScript tests
-npm run e2e:anvil                                      # full flow, locally, ~20s
+cd contracts && forge install && forge test && cd ..   # 241 Foundry tests
+npm test                                               # 184 TypeScript tests
+npm run e2e:anvil                                      # full flow, locally, ~60s
 ```
+
+`e2e:anvil` runs four scenarios end to end — baseline settlement, liveness
+(stall → exclude → re-settle → never settle the same paper twice), redemption
+(dark debtor → self-serve recovery with no proofs → the recovered IOU can never
+net again), and atomic cross-currency PvP (settle · sabotage abort ·
+forced-revert atomicity). The same four pass against the live V3 hubs with
+`npm run e2e:testnet`.
 
 Live dashboard, locally (spawns anvil, deploys, funds five agents — the same
 thing the [arclear-demo.fly.dev](https://arclear-demo.fly.dev) sandbox runs):
@@ -208,50 +225,122 @@ gas and collateral), and `AGENT_MNEMONIC`.
 
 You can skip deploying entirely and point `.env` at the already-live hubs in
 [Deployed hubs](#deployed-hubs-arc-testnet-chain-5042002) below. To deploy
-your own, the demo needs **three** contracts — a `ClearingHubV2` per token
-plus the `PvPRouter` that binds them (`demo/setup.ts` requires all three and
+your own, the demo needs **three** contracts — a `ClearingHubV3` per token
+plus the `PvPRouterV3` that binds them (`demo/setup.ts` requires all three and
 refuses to start otherwise):
 
 ```bash
-# 1. V2 USDC hub  (K=3 / RING=16 / L=86400 defaults — all UNCALIBRATED;
-#    override with HUB_K / HUB_RING / HUB_MAX_IOU_LIFETIME)
+# 1. V3 USDC hub. The constructor is (token, K) — V3 takes ONE tunable.
+#    K=3 is an UNCALIBRATED demo-scale default; override with HUB_K.
+#    RING and MAX_IOU_LIFETIME are gone with the root ring and the coverage
+#    rule; HUB_RING / HUB_MAX_IOU_LIFETIME have no effect.
 TOKEN_ADDRESS=0x3600000000000000000000000000000000000000 \
-forge script contracts/script/DeployV2.s.sol --root contracts \
+forge script contracts/script/DeployV3.s.sol --root contracts \
   --rpc-url "$ARC_RPC_URL" --private-key "$DEPLOYER_PK" \
   --broadcast --with-gas-price 25gwei
 
-# 2. V2 EURC hub (same bytecode, different token)
+# 2. V3 EURC hub (same bytecode, different token)
 TOKEN_ADDRESS=0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a \
-forge script contracts/script/DeployV2.s.sol --root contracts \
+forge script contracts/script/DeployV3.s.sol --root contracts \
   --rpc-url "$ARC_RPC_URL" --private-key "$DEPLOYER_PK" \
   --broadcast --with-gas-price 25gwei
 
-# 3. Put both printed addresses into .env as HUB_V2_USDC / HUB_V2_EURC,
-#    then deploy the router that pins them as constructor immutables
-HUB_V2_USDC=0x… HUB_V2_EURC=0x… \
-forge script contracts/script/DeployPvPRouter.s.sol --root contracts \
+# 3. Put both printed addresses into .env as HUB_V3_USDC / HUB_V3_EURC,
+#    then deploy the router that pins them as constructor immutables. The
+#    script refuses a pair that is zero-addressed, identical, codeless, not
+#    actually ClearingHubV3, or clearing the same token.
+HUB_V3_USDC=0x… HUB_V3_EURC=0x… \
+forge script contracts/script/DeployPvPRouterV3.s.sol --root contracts \
   --rpc-url "$ARC_RPC_URL" --private-key "$DEPLOYER_PK" \
   --broadcast --with-gas-price 25gwei
 ```
 
-Then finish `.env`: `PVP_ROUTER` (the printed router address) and
-`HUB_V2_DEPLOY_BLOCK` (your **V2 USDC** hub's deploy block, decimal — the
+Then finish `.env`: `PVP_ROUTER_V3` (the printed router address) and
+`HUB_V3_DEPLOY_BLOCK` (your **V3 USDC** hub's deploy block, decimal — the
 public RPC prunes old history, so event scans need a floor; it is printed in
-`contracts/broadcast/DeployV2.s.sol/5042002/`). Now:
+`contracts/broadcast/DeployV3.s.sol/5042002/`). Now:
 
 ```bash
 npm run e2e:testnet        # or: npm run demo (dashboard against testnet)
 ```
 
-> `HUB_USDC` / `HUB_EURC` in `.env.example` are the **v1** `ClearingHub`
-> addresses, kept as a record of the still-live Arclear Net v1 deployment.
-> Nothing in `src/`, `demo/` or `contracts/` reads them, and
-> `contracts/script/Deploy.s.sol` (which deploys v1) is not part of this
-> path — the demo has run on `ClearingHubV2` since Phase 1.
+> `.env.example` also carries `HUB_USDC` / `HUB_EURC` (v1 `ClearingHub`) and
+> `HUB_V2_USDC` / `HUB_V2_EURC` / `PVP_ROUTER` (V2). Both sets are **unused by
+> the demo** and kept only as a record of the still-deployed earlier
+> generations — nothing in `src/`, `demo/` or `contracts/` reads them, and
+> `Deploy.s.sol` / `DeployV2.s.sol` / `DeployPvPRouter.s.sol` are not part of
+> this path.
 
 ### Deployed hubs (Arc Testnet, chain 5042002)
 
-**Arclear Net v1** (`ClearingHub` — unanimous consent; stays live):
+Three generations are live. **V3 is current** — it is what the SDK, the demo
+and the hosted testnet dashboard use, and what unqualified statements in these
+docs describe. Earlier generations are kept on-chain as a record and are
+labeled below; **do not point new integrations at them.**
+
+**Arclear Net v3 — current hubs** (`ClearingHubV3` — threshold consent +
+party-bound merkle manifests + a permanent consumption ledger + proofless O(1)
+`redeemIOU`. One tunable, `K = 3`, an **uncalibrated** demo-scale default;
+`RING` and `L` no longer exist. Set as `HUB_V3_USDC` / `HUB_V3_EURC` in
+`.env`):
+
+| token | hub | status |
+| ----- | --- | ------ |
+| USDC `0x3600…0000` | [`0xfe96A00f14d61F36AcECe69c39eA01C8af02C1ad`](https://testnet.arcscan.app/address/0xfe96A00f14d61F36AcECe69c39eA01C8af02C1ad) | source verified ✓ · **current** |
+| EURC `0x89B5…D72a` | [`0x79ea853CcaA1FE41f7EDc26469AeAFD905676Fb5`](https://testnet.arcscan.app/address/0x79ea853CcaA1FE41f7EDc26469AeAFD905676Fb5) | source verified ✓ · **current** |
+
+**Cross-currency PvP router** (`PvPRouterV3` — atomic USDC+EURC
+payment-vs-payment rounds against the two V3 hubs above, which it pins as
+constructor immutables; stateless, holds no funds, no owner, no pause. EIP-712
+domain `("ArclearPvPRouterV3", "1")`, so V2-router consents can never replay
+here. Set as `PVP_ROUTER_V3` in `.env`; spec in [PROTOCOL.md → Cross-currency
+PvP rounds](docs/PROTOCOL.md#cross-currency-pvp-rounds)):
+
+| contract | address | status |
+| -------- | ------- | ------ |
+| PvPRouterV3 (hubUSDC `0xfe96…C1ad` · hubEURC `0x79ea…6Fb5`) | [`0xb69596295AdB785571eeA1eAed9aeD162A510d42`](https://testnet.arcscan.app/address/0xb69596295AdB785571eeA1eAed9aeD162A510d42) | source verified ✓ · **current** |
+
+Deploy block of the V3 USDC hub — set as `HUB_V3_DEPLOY_BLOCK`, the floor for
+every event scan, since the public RPC prunes old history: **54004274**.
+
+The full live-testnet run against V3, all four scenarios, in one sitting:
+
+| what | on chain |
+| ---- | -------- |
+| Baseline round — 105 obligations, 5 participants, $0.170373 settled, 3,211,427 gas, one transaction | [`0x97546e…527171`](https://testnet.arcscan.app/tx/0x97546ebfe62f758da5648359b576d97d49603e52bd64c2f7d5d322a9d7527171) |
+| Self-serve redemption against a dark debtor — **no proofs**, 74,825 gas | [`0x92506e…288c3e`](https://testnet.arcscan.app/tx/0x92506e982f8e5d02a911af754fc86cee11b873c799f4d6c4e8e58545be288c3e) |
+| Atomic cross-currency PvP — USDC and EURC legs advancing in one transaction, 624,338 gas | [`0x8cc874…1f8aa7`](https://testnet.arcscan.app/tx/0x8cc8749392eec5f2c516822bb7b735d95954a42d44d1fd943f397bd21d1f8aa7) |
+
+**Arclear Net v2** (`ClearingHubV2` — threshold consent + merkle manifests +
+`redeemIOU`. **Superseded and still live.** A 2026-07-27 audit found two ways
+any party can permanently destroy redemption on these hubs, per-IOU or hub-wide,
+for a few hundred thousand gas — that is why V3 exists. Settlement safety and
+zero-sum on them are unaffected; only the recovery product is. If you use them,
+size credit on caps + posted collateral alone —
+[THREAT-MODEL.md](docs/THREAT-MODEL.md) rows 28/29):
+
+| token | hub | status |
+| ----- | --- | ------ |
+| USDC `0x3600…0000` | [`0x3b9a9617b91589a15A14122183e6305D9F0a5a16`](https://testnet.arcscan.app/address/0x3b9a9617b91589a15A14122183e6305D9F0a5a16) | source verified ✓ · superseded |
+| EURC `0x89B5…D72a` | [`0xECcCD7E43B0Caf4D81420483dEE20E5e258FB85E`](https://testnet.arcscan.app/address/0xECcCD7E43B0Caf4D81420483dEE20E5e258FB85E) | source verified ✓ · superseded |
+| PvPRouter (V2) | [`0x8287dD162e73f1a1DD15774dDc8A4137a2d3fE8c`](https://testnet.arcscan.app/address/0x8287dD162e73f1a1DD15774dDc8A4137a2d3fE8c) | source verified ✓ · superseded |
+
+Real cross-currency settlement through the V2 router, kept as a record — a USDC
+leg and an EURC leg (FX trades at an agreed 0.9896 rate mixed with ordinary
+same-currency flows), both hubs advancing atomically in one transaction,
+507,394 gas:
+[`0x05c64e…f66197`](https://testnet.arcscan.app/tx/0x05c64e9c1a9280989980240e89b4451c2b50fc945800fb7f28cdbebf8af66197)
+
+**Arclear Net v2 — Phase-1 hubs** (threshold consent only, no merkle
+manifests or redemption; superseded, still live on-chain):
+
+| token | hub | status |
+| ----- | --- | ------ |
+| USDC `0x3600…0000` | [`0xa984c64e1eA12B5aF5F573d58C3483fB8aB47f3c`](https://testnet.arcscan.app/address/0xa984c64e1eA12B5aF5F573d58C3483fB8aB47f3c) | source verified ✓ · superseded |
+| EURC `0x89B5…D72a` | [`0x57A047599EaCDbe77Cc8C1A7978f88D700332Cb3`](https://testnet.arcscan.app/address/0x57A047599EaCDbe77Cc8C1A7978f88D700332Cb3) | source verified ✓ · superseded |
+
+**Arclear Net v1** (`ClearingHub` — unanimous consent; the original primitive,
+stays live):
 
 | token | hub | status |
 | ----- | --- | ------ |
@@ -261,41 +350,6 @@ npm run e2e:testnet        # or: npm run demo (dashboard against testnet)
 Real settlement on the v1 USDC hub — 105 IOUs, $5.52 gross, $0.43 settled,
 92.3% compression, one transaction:
 [`0x64f3c5…a2c69`](https://testnet.arcscan.app/tx/0x64f3c58b0af6efcc622248550a7ca0dd963c35251c3f79b2fd237da89cfa2c69)
-
-**Arclear Net v2 — current hubs** (`ClearingHubV2` — threshold consent +
-merkle manifests + on-chain IOU redemption via `redeemIOU`; redemption
-params K=3 / RING=16 / L=86,400 s are **uncalibrated** demo-scale defaults
-(the sweep findings are in [CALIBRATION.md](docs/CALIBRATION.md)); set these
-as `HUB_V2_USDC` / `HUB_V2_EURC` in `.env`, v1 keys stay):
-
-| token | hub | status |
-| ----- | --- | ------ |
-| USDC `0x3600…0000` | [`0x3b9a9617b91589a15A14122183e6305D9F0a5a16`](https://testnet.arcscan.app/address/0x3b9a9617b91589a15A14122183e6305D9F0a5a16) | source verified ✓ |
-| EURC `0x89B5…D72a` | [`0xECcCD7E43B0Caf4D81420483dEE20E5e258FB85E`](https://testnet.arcscan.app/address/0xECcCD7E43B0Caf4D81420483dEE20E5e258FB85E) | source verified ✓ |
-
-**Cross-currency PvP router** (`PvPRouter` — atomic USDC+EURC
-payment-vs-payment rounds against the two current V2 hubs above, which it
-pins as constructor immutables; stateless, holds no funds; set as
-`PVP_ROUTER` in `.env`; spec in [PROTOCOL.md → Cross-currency PvP
-rounds](docs/PROTOCOL.md#cross-currency-pvp-rounds)):
-
-| contract | address | status |
-| -------- | ------- | ------ |
-| PvPRouter (hubUSDC `0x3b9a…5a16` · hubEURC `0xECcC…B85E`) | [`0x8287dD162e73f1a1DD15774dDc8A4137a2d3fE8c`](https://testnet.arcscan.app/address/0x8287dD162e73f1a1DD15774dDc8A4137a2d3fE8c) | source verified ✓ |
-
-Real cross-currency settlement through the router — a USDC leg and an EURC
-leg (FX trades at an agreed 0.9896 rate mixed with ordinary same-currency
-flows), both hubs advancing atomically in one transaction, 507,394 gas:
-[`0x05c64e…f66197`](https://testnet.arcscan.app/tx/0x05c64e9c1a9280989980240e89b4451c2b50fc945800fb7f28cdbebf8af66197)
-
-**Arclear Net v2 — Phase-1 hubs** (threshold consent only, no merkle
-manifests or redemption; superseded by the hubs above but still live
-on-chain):
-
-| token | hub | status |
-| ----- | --- | ------ |
-| USDC `0x3600…0000` | [`0xa984c64e1eA12B5aF5F573d58C3483fB8aB47f3c`](https://testnet.arcscan.app/address/0xa984c64e1eA12B5aF5F573d58C3483fB8aB47f3c) | source verified ✓ · superseded |
-| EURC `0x89B5…D72a` | [`0x57A047599EaCDbe77Cc8C1A7978f88D700332Cb3`](https://testnet.arcscan.app/address/0x57A047599EaCDbe77Cc8C1A7978f88D700332Cb3) | source verified ✓ · superseded |
 
 > Gas-token gotcha (documented so you don't rediscover it): USDC is Arc's
 > native gas token *and* the ERC-20 at `0x3600…0000` — one balance, two
@@ -380,56 +434,150 @@ Findings, including the ones that surprised us:
    below.
 
 **Design consequence:** the value of netting concentrates in *larger* pools —
-exactly where unanimous consent gets fragile. That makes threshold consent
-(v2) the highest-value next step, ahead of any margin/default machinery: the
-data says scale the pool before you underwrite it.
+exactly where unanimous consent gets fragile. That made threshold consent the
+highest-value next step, ahead of any margin/default machinery: the data said
+scale the pool before you underwrite it. It shipped, and
+[CALIBRATION.md](docs/CALIBRATION.md) then measured what the two-pass abort cap
+costs at scale — the practical unlock is n ≈ 15 at 90% per-round member uptime
+and n ≈ 30 at 95%, beyond which aborts dominate.
 
-## Trust model (v1), honestly
+## What the audit found, and what the fix cost
+
+The most useful thing in this repo may be that it survived being audited
+properly. A full-repo audit on 2026-07-27 found **two redeploy-class flaws in
+the shipped `ClearingHubV2` redemption path**, both reproduced against the live
+contract:
+
+1. **Manifest poisoning.** `executeRound` accepted a bare list of consumed IOU
+   ids and never bound one to anybody. Rounds were free (two throwaway
+   addresses, zero deltas, no collateral, no IOU needs to exist), so anyone —
+   canonically the debtor — could write a victim's IOU id into a manifest.
+   After that, no non-inclusion proof for that id could ever exist and
+   `redeemIOU` was permanently defeated for it. ~3,808 gas per poisoned id.
+2. **Root-ring flush.** Redemption required a non-inclusion proof against every
+   root in a 16-slot ring, plus a coverage precondition comparing the oldest
+   buffered timestamp against `expiry − L`. `oldestExecutedAt` only ever rises,
+   so ~1.05M gas of free rounds closed that window **permanently, for every
+   outstanding IOU on the hub at once**, against every debtor. Verified still
+   reverting a week later.
+
+Settlement safety, zero-sum and the signed-consent invariant were never
+affected — both attacks execute rounds that move no balance and that every
+participant signed. The damage was confined to the recovery product. But
+"recovery any stranger can delete for a few hundred thousand gas" is not a
+credit bound, and the docs said so plainly rather than shipping past it.
+
+**V3 is the redesign.** Manifest leaves became **party-bound**
+(`keccak256(id ‖ lo ‖ hi)` over the sorted debtor/creditor pair), so consuming
+real paper requires the **creditor** to be a signing participant — a poisoner
+writes a different key that no honest redemption reads. And consumption became
+a **permanent on-chain ledger** rather than a ring of roots, which deleted the
+ring, the coverage rule, the `MAX_IOU_LIFETIME` parameter and the entire
+non-inclusion proof surface. Redemption is now O(1) and history-independent.
+
+**What it cost, measured** (`contracts/test/GasScalingV3.t.sol`, like-for-like
+against the V2 shapes, intrinsic gas included):
+
+| shape | V2 | V3 | change |
+| ----- | -- | -- | ------ |
+| n=2, m=1 | 187,097 | 164,331 | **−12%** — deleting the ring write pays for one ledger entry |
+| n=5, m=3 | 358,145 | 384,147 | +7% |
+| n=30, m=15 | 1,763,412 | 2,085,139 | +18% |
+| n=50, m=25 | 2,899,734 | 3,469,775 | +20% |
+| n=5, m=105 (demo) | 800,609 | 3,316,379 | **+314% (4.1×)** |
+| `redeemIOU` execution | 199,604 | **57,779** | **−71% (3.5× cheaper)**, and no longer grows with history |
+
+So: **7–20% more gas at realistic round shapes** (a participant only appears
+because one of their IOUs was consumed, so `m ≈ n/2` is the floor), 4.1× at the
+demo's manifest-heavy `m = 105`, in exchange for a redemption guarantee no
+third party can destroy and a redemption path that got 3.5× cheaper. Note the
+inversion: under v2 rounds were cheap and redemption dear; under v3 it is the
+other way round. Budget accordingly.
+
+**What V3 does not claim.** Staleness is paced by rounds, not seconds, so a
+debtor can refresh their own clock by settling fabricated paper with an
+accomplice, and a third party can accelerate everyone else's staleness by
+paying for rounds — neither moves collateral without the affected party's
+signature, and both are documented rather than papered over. Redemption still
+races the never-pausable `withdraw`. Single-leg PvP extraction is unchanged and
+still accepted. **And the V2 hubs stay deployed with both flaws live** — they
+are labeled as superseded in the table above, not quietly retired.
+
+Full write-up: [PROTOCOL.md → What V3 fixed, and what is still live on the V2
+hubs](docs/PROTOCOL.md#what-v3-fixed-and-what-is-still-live-on-the-v2-hubs) and
+[THREAT-MODEL.md](docs/THREAT-MODEL.md) rows 28/29.
+
+## Trust model, honestly
 
 - **Safety is on-chain and unconditional**: no balance moves without its
   owner's signature over the exact full position set. A malicious coordinator
   is structurally harmless — it holds no keys, every participant recomputes
   the netting before consenting (`verifyProposal`), and any tampering breaks
-  the shared digest. Fuzz tests assert every perturbation reverts.
-- **Liveness is bounded (v2)**: an unresponsive participant no longer stalls
+  the shared digest. Fuzz tests assert every perturbation reverts. This held
+  unchanged through all three contract generations, including under both audit
+  findings above.
+- **Liveness is bounded**: an unresponsive participant no longer stalls
   settlement — threshold consent excludes non-responders in one deterministic
   batch and rebuilds the round from the consenting subset (worst case two
   signature-collection passes: a latency cost, never a safety cost; spec in
   [PROTOCOL.md](docs/PROTOCOL.md)). Withdrawal is never pausable, and credit
   caps still bound a staller's paper.
 - **Credit between rounds is a bounded bet**: the SDK's bilateral caps limit
-  worst-case loss per counterparty to the cap you configured.
-- No upgradeability, no fees, no owner access to funds.
+  worst-case loss per counterparty to the cap you configured. On V3,
+  `redeemIOU` is a real second line — eligibility is one permanent on-chain
+  read no third party can forge or erode — but it still races the
+  never-pausable `withdraw`, so caps remain what you size against.
+- **The redemption clock is paced by rounds, not seconds**, which anyone
+  willing to pay for rounds can move in either direction. Documented, not
+  claimed closed; it never moves collateral without the affected party's
+  signature.
+- No upgradeability, no fees, no owner access to funds. `renounceOwnership` is
+  disabled on V3 — renouncing while paused would make `unpause` unreachable and
+  brick the protocol (funds would still exit, since `withdraw` is never
+  pausable).
 
 Full checklist: [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md). Protocol spec:
 [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
-## Roadmap (v2)
+## Roadmap
 
 In order, per the sweep data:
 
-1. **Threshold consent** — ✅ shipped (`ClearingHubV2`, live on Arc Testnet
-   above): non-signers are *excluded and recomputed*, never outvoted; the
-   final set still signs unanimously, preserving consent-before-settlement.
-2. **Merkle manifests + on-chain IOU redemption** — ✅ shipped
-   (`ClearingHubV2`, current hubs above): sorted-leaf merkle manifest roots
-   in the same `bytes32` field, per-IOU inclusion/non-inclusion proofs, and
-   `redeemIOU` recovery against an unresponsive debtor's collateral
-   (K/RING/L uncalibrated, labeled as such — calibration is the next
-   checkpoint).
-3. **Cross-currency rounds** — ✅ shipped (`PvPRouter`, live on Arc Testnet
-   above): USDC and EURC legs settling atomically (payment-vs-payment, a
-   miniature CLS on Arc), with the agreed per-round FX rate signed into the
-   union's PvPRound consent digest.
+1. **Threshold consent** — ✅ shipped: non-signers are *excluded and
+   recomputed*, never outvoted; the final set still signs unanimously,
+   preserving consent-before-settlement.
+2. **Merkle manifests + on-chain IOU redemption** — ✅ shipped: sorted-leaf
+   merkle manifest roots in the same `bytes32` field, and `redeemIOU` recovery
+   against an unresponsive debtor's collateral.
+3. **Cross-currency rounds** — ✅ shipped (`PvPRouterV3`, live above): USDC and
+   EURC legs settling atomically (payment-vs-payment, a miniature CLS on Arc),
+   with the agreed per-round FX rate signed into the union's PvPRound consent
+   digest.
+4. **Audit and redeploy** — ✅ shipped (`ClearingHubV3` + `PvPRouterV3`, the
+   current hubs above): party-bound manifest leaves and a permanent consumption
+   ledger, closing both redeploy-class findings of the 2026-07-27 audit. See
+   [What the audit found](#what-the-audit-found-and-what-the-fix-cost).
+5. **Calibrate `K`** — next. `K = 3` remains an uncalibrated demo-scale
+   default; V3 shrank the calibration surface from `K`/`RING`/`L` to `K` alone
+   and removed the ring-depth-versus-cadence trade-off that made the original
+   question hard ([CALIBRATION.md](docs/CALIBRATION.md)).
 
 ## For Arc Open Source Showcase reviewers
 
-**What primitives does this expose?** A forkable clearing layer: a 181-line
-collateral-and-settlement contract (430 lines with the v2 extensions in
-`ClearingHubV2`, plus a 247-line `PvPRouter`), a deterministic netting engine with a
-published spec third parties can re-implement, EIP-712 IOU/consent schemas,
-credit-cap tracking, and a reference coordinator + dashboard. Each piece is
-importable on its own.
+**What primitives does this expose?** A forkable clearing layer: a
+collateral-and-settlement contract that started at 181 lines (`ClearingHub`)
+and is 599 in its current form (`ClearingHubV3`, party-bound manifests +
+consumption ledger + redemption), plus a 410-line stateless `PvPRouterV3`; a
+deterministic netting engine with a published spec third parties can
+re-implement; EIP-712 IOU/consent schemas; credit-cap tracking; and a reference
+coordinator + dashboard. Each piece is importable on its own.
+
+**Is it honest about its own failures?** That is the part worth reviewing. A
+full-repo audit found two real flaws in the shipped V2 contract; the repo
+documents exactly what they were, what they cost to exploit, the redesign that
+closes them, and the ~7–20% round-gas increase that fix was worth paying —
+rather than quietly redeploying. The superseded hubs stay listed and labeled.
+See [What the audit found](#what-the-audit-found-and-what-the-fix-cost).
 
 **What does it add beyond the `circlefin/arc-*` repos?** Those repos cover
 *making* payments (commerce, p2p, x402 nanopayments, escrow, FX). None touch
