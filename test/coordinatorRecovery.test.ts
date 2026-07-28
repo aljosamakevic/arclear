@@ -109,9 +109,15 @@ function fakeChain() {
     collateral: async () => 10_000_000n,
     executeRound: async (
       _w: WalletClient,
-      proposal: { roundNonce: bigint; digest: Hex; consumedIds: Hex[] },
+      proposal: { roundNonce: bigint; digest: Hex; consumed: { id: Hex }[] },
     ) => {
-      chain.submissions.push({ digest: proposal.digest, consumedIds: [...proposal.consumedIds] });
+      // v3: the proposal carries party-bound entries, not a bare id list. The
+      // stub still records raw ids because that is what settledIds is keyed on
+      // and what these disjointness assertions compare.
+      chain.submissions.push({
+        digest: proposal.digest,
+        consumedIds: proposal.consumed.map((c) => c.id),
+      });
       if (chain.broadcast === "throw") {
         // The audit's exact shape: the call fails before any transaction
         // exists, so nothing can ever mine at this nonce.

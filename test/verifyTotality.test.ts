@@ -5,8 +5,9 @@ import type { Address, Hex } from "viem";
 import { signIou } from "../src/iou.js";
 import { net } from "../src/netting.js";
 import { buildProposal, manifestHash, verifyProposal } from "../src/round.js";
+import { manifestLeafId } from "../src/merkle.js";
 import { buildPvPProposal, verifyPvPProposal } from "../src/pvp.js";
-import type { Iou, RoundProposal } from "../src/types.js";
+import type { ConsumedIou, Iou, RoundProposal } from "../src/types.js";
 
 /**
  * B-CR-04 regression: `verifyProposal` (and `verifyPvPProposal`, which
@@ -38,12 +39,54 @@ function iou(debtor: Address, creditor: Address, amount: bigint, nonce = 1n): Io
   };
 }
 
-/** Malformed id lists, exactly the four classes the audit executed. */
-const MALFORMED: Record<string, Hex[]> = {
-  duplicate: [("0x" + "11".repeat(32)) as Hex, ("0x" + "11".repeat(32)) as Hex],
-  descending: [("0x" + "ff".repeat(32)) as Hex, ("0x" + "00".repeat(32)) as Hex],
-  "short hex": ["0xdead" as Hex],
-  "non-hex": ["nope" as unknown as Hex],
+/**
+ * A consumed entry whose parties ARE the proposal's participants and whose
+ * leafId is self-consistent — so the v3 structural gate passes and
+ * verification reaches the merkle/digest primitives that used to throw. That
+ * reachability is the whole point: a refusal produced by the structural gate
+ * would prove nothing about totality.
+ */
+function wellFormedEntry(id: Hex): ConsumedIou {
+  return {
+    id,
+    debtor: alice.address,
+    creditor: bob.address,
+    leafId: manifestLeafId(id, alice.address, bob.address),
+  };
+}
+
+/** An entry carrying an unhashable id — leaf derivation itself throws. */
+function badIdEntry(id: Hex): ConsumedIou {
+  return {
+    id,
+    debtor: alice.address,
+    creditor: bob.address,
+    // Placeholder: manifestLeafId(id, ...) cannot be computed for this id at
+    // all, which is exactly the throwing path under test.
+    leafId: ("0x" + "00".repeat(32)) as Hex,
+  };
+}
+
+const ID_A = ("0x" + "11".repeat(32)) as Hex;
+const ID_B = ("0x" + "ff".repeat(32)) as Hex;
+
+/**
+ * v3 note: ascent is BY DERIVED LEAF, so a descending vector must be built
+ * from real leaves rather than hand-picked ids — sorting by id says nothing
+ * about the order merkleRoot will see.
+ */
+const DESCENDING_BY_LEAF: ConsumedIou[] = (() => {
+  const x = wellFormedEntry(ID_A);
+  const y = wellFormedEntry(ID_B);
+  return x.leafId > y.leafId ? [x, y] : [y, x];
+})();
+
+/** Malformed consumed sets, the same four classes the audit executed. */
+const MALFORMED: Record<string, ConsumedIou[]> = {
+  duplicate: [wellFormedEntry(ID_A), wellFormedEntry(ID_A)],
+  descending: DESCENDING_BY_LEAF,
+  "short hex": [badIdEntry("0xdead" as Hex)],
+  "non-hex": [badIdEntry("nope" as unknown as Hex)],
 };
 
 /**
@@ -51,7 +94,7 @@ const MALFORMED: Record<string, Hex[]> = {
  * paper and nets to zero — so verification runs past the delta check and
  * reaches the merkle/digest primitives that used to throw.
  */
-function bystanderProposal(consumedIds: Hex[], deltas: [bigint, bigint]): RoundProposal {
+function bystanderProposal(consumed: ConsumedIou[], deltas: [bigint, bigint]): RoundProposal {
   const participants = [alice.address, bob.address].sort((x, y) =>
     x.toLowerCase() < y.toLowerCase() ? -1 : 1,
   );
@@ -61,14 +104,14 @@ function bystanderProposal(consumedIds: Hex[], deltas: [bigint, bigint]): RoundP
     deltas,
     manifestHash: ("0x" + "ab".repeat(32)) as Hex,
     digest: ("0x" + "cd".repeat(32)) as Hex,
-    consumedIds,
+    consumed,
   };
 }
 
 describe("CR-04: verifyProposal is total", () => {
-  for (const [name, consumedIds] of Object.entries(MALFORMED)) {
-    it(`refuses ${name} consumedIds as data instead of throwing`, () => {
-      const proposal = bystanderProposal(consumedIds, [0n, 0n]);
+  for (const [name, consumed] of Object.entries(MALFORMED)) {
+    it(`refuses a ${name} consumed set as data instead of throwing`, () => {
+      const proposal = bystanderProposal(consumed, [0n, 0n]);
       let check!: { ok: boolean; reason?: string };
       expect(() => {
         check = verifyProposal(HUB, proposal, [], alice.address, { now: NOW });
@@ -76,16 +119,16 @@ describe("CR-04: verifyProposal is total", () => {
       expect(check.ok).toBe(false);
       expect(check.reason).toBeTruthy();
       // The primitive's own diagnostic survives into the reason.
-      expect(() => manifestHash(consumedIds)).toThrow();
+      expect(() => manifestHash(consumed)).toThrow();
     });
 
-    it(`refuses ${name} consumedIds through verifyPvPProposal too`, async () => {
+    it(`refuses a ${name} consumed set through verifyPvPProposal too`, async () => {
       const at = { now: NOW };
       const eurcIou = await signIou(HUB_EURC, iou(bob.address, alice.address, 5n), bob, undefined, at);
       const eurcLeg = buildProposal(HUB_EURC, 0n, net([eurcIou], { now: NOW, hub: HUB_EURC }));
       const bundle = buildPvPProposal(
         ROUTER,
-        bystanderProposal(consumedIds, [0n, 0n]),
+        bystanderProposal(consumed, [0n, 0n]),
         eurcLeg,
         1n,
         1n,
@@ -124,7 +167,7 @@ describe("CR-04: verifyProposal is total", () => {
 
   it("refuses structurally broken proposals (null fields, wrong types)", () => {
     const junk = [
-      { ...bystanderProposal([], [0n, 0n]), consumedIds: null as unknown as Hex[] },
+      { ...bystanderProposal([], [0n, 0n]), consumed: null as unknown as ConsumedIou[] },
       { ...bystanderProposal([], [0n, 0n]), participants: null as unknown as Address[] },
       { ...bystanderProposal([], [0n, 0n]), deltas: null as unknown as bigint[] },
       { ...bystanderProposal([], [0n, 0n]), participants: ["not-an-address" as Address, bob.address] },
@@ -157,7 +200,15 @@ describe("CR-04: verifyProposal is total", () => {
       deltas: fc.array(fc.bigInt({ min: -(2n ** 300n), max: 2n ** 300n }), { maxLength: 5 }),
       manifestHash: arbHexish,
       digest: arbHexish,
-      consumedIds: fc.array(arbHexish, { maxLength: 5 }),
+      consumed: fc.array(
+        fc.record({
+          id: arbHexish,
+          debtor: fc.oneof(fc.constant(alice.address), fc.string().map((x) => x as Address)),
+          creditor: fc.oneof(fc.constant(bob.address), fc.string().map((x) => x as Address)),
+          leafId: arbHexish,
+        }),
+        { maxLength: 5 },
+      ),
     });
     fc.assert(
       fc.property(arbProposal, (proposal) => {

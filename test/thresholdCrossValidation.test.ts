@@ -173,7 +173,7 @@ async function runSeed(
     // EXACT bigint equality — the faithfulness proof.
     expect(attempt.result.settledVolume).toBe(record.settledVolume);
     expect(attempt.result.grossVolume).toBe(record.grossVolume);
-    expect(attempt.proposal.consumedIds.length).toBe(record.consumedCount);
+    expect(attempt.proposal.consumed.length).toBe(record.consumedCount);
 
     // Per-member delta equality through the remap (WR-04): the settled
     // round's exact per-member allocation, not just its aggregate volumes.
@@ -194,7 +194,7 @@ async function runSeed(
     // Fold consumed ids exactly as Coordinator.runRound does, then prune the
     // pool (value-neutral: net() rule 3 drops settled ids anyway — this
     // mirrors the model's own pruning and Coordinator.openIous).
-    for (const id of attempt.proposal.consumedIds) settledIds.add(id.toLowerCase() as Hex);
+    for (const c of attempt.proposal.consumed) settledIds.add(c.id.toLowerCase() as Hex);
     openPool = openPool.filter((s) => !settledIds.has(s.id.toLowerCase() as Hex));
   }
 
