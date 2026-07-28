@@ -13,7 +13,8 @@ import {
   verifyConsent,
   verifyProposal,
 } from "../src/round.js";
-import { net } from "../src/netting.js";
+import { consumedIds, net } from "../src/netting.js";
+import { manifestLeafId } from "../src/merkle.js";
 import type { Iou } from "../src/types.js";
 
 const HUB = "0x1111111111111111111111111111111111111111" as Address;
@@ -125,12 +126,23 @@ describe("EIP-712 sign/verify", () => {
     // The coordinator shows the honest ids (so the delta and id-presence checks
     // pass) but commits to a different manifest, then recomputes the digest so
     // ONLY the manifest binding can fire.
-    const swapped = { ...proposal, manifestHash: manifestHash([("0x" + "cd".repeat(32)) as Hex]) };
+    const otherId = ("0x" + "cd".repeat(32)) as Hex;
+    const swapped = {
+      ...proposal,
+      manifestHash: manifestHash([
+        {
+          id: otherId,
+          debtor: alice.address,
+          creditor: bob.address,
+          leafId: manifestLeafId(otherId, alice.address, bob.address),
+        },
+      ]),
+    };
     const forged = { ...swapped, digest: roundDigest(HUB, swapped) };
 
     const check = verifyProposal(HUB, forged, [a, b], alice.address, { now: NOW });
     expect(check.ok).toBe(false);
-    expect(check.reason).toBe("manifestHash does not match consumedIds");
+    expect(check.reason).toBe("manifestHash does not match the consumed set");
   });
 
   it("refuses a proposal whose digest field does not match its contents", async () => {
@@ -190,9 +202,9 @@ describe("EIP-712 sign/verify", () => {
       now: NOW,
     });
     const filtered = net([a, b], { now: NOW, hub: HUB, redeemedIds: new Set([a.id]) });
-    expect(filtered.consumedIds).toEqual([b.id.toLowerCase()]);
+    expect(consumedIds(filtered.consumed)).toEqual([b.id.toLowerCase()]);
     const unfiltered = net([a, b], { now: NOW, hub: HUB });
-    expect(unfiltered.consumedIds).toHaveLength(2);
+    expect(unfiltered.consumed).toHaveLength(2);
   });
 
   it("matches the shared fixture consumed by the Foundry parity test", () => {
@@ -208,6 +220,22 @@ describe("EIP-712 sign/verify", () => {
       manifestHash: f.manifestHash,
     });
     expect(digest).toBe(f.digest);
-    expect(manifestHash([f.iouId])).toBe(f.manifestHash);
+    // v3: the manifest preimage is the PARTY-BOUND leaf. Assert the full
+    // chain the Solidity side re-derives — id + parties -> leaf -> root —
+    // rather than treating manifestHash as an opaque fixture constant.
+    expect(manifestLeafId(f.consumedId0, f.consumedPartyA0, f.consumedPartyB0)).toBe(
+      f.consumedLeaf0,
+    );
+    expect(f.consumedId0).toBe(f.iouId);
+    expect(
+      manifestHash([
+        {
+          id: f.consumedId0,
+          debtor: f.consumedPartyA0,
+          creditor: f.consumedPartyB0,
+          leafId: f.consumedLeaf0,
+        },
+      ]),
+    ).toBe(f.manifestHash);
   });
 });

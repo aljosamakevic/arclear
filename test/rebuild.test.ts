@@ -3,7 +3,7 @@ import fc from "fast-check";
 import { keccak256, toHex, type Address, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { iouId, signIou } from "../src/iou.js";
-import { net } from "../src/netting.js";
+import { consumedIds, net } from "../src/netting.js";
 import {
   buildProposal,
   rebuildProposal,
@@ -91,7 +91,7 @@ describe("rebuildProposal properties", () => {
         const ex = new Set(excluded.map((a) => a.toLowerCase()));
         const byId = new Map(ious.map((s) => [s.id.toLowerCase(), s]));
         const { proposal } = rebuildProposal(HUB, 0n, ious, excluded, { now: NOW });
-        for (const id of proposal.consumedIds) {
+        for (const id of consumedIds(proposal.consumed)) {
           const s = byId.get(id.toLowerCase());
           expect(s).toBeDefined();
           expect(ex.has(s!.iou.debtor.toLowerCase())).toBe(false);
@@ -144,7 +144,7 @@ describe("rebuildProposal properties", () => {
           now: NOW,
           settledIds: settled,
         });
-        for (const id of proposal.consumedIds) {
+        for (const id of consumedIds(proposal.consumed)) {
           expect(settled.has(id.toLowerCase() as Hex)).toBe(false);
         }
       }),
@@ -226,7 +226,7 @@ describe("verifyProposal with excluded set", () => {
     const tampered = {
       ...p,
       digest: roundDigest(HUB, p),
-      consumedIds: proposal.consumedIds,
+      consumed: proposal.consumed,
     };
     const check = verifyProposal(HUB, tampered, ious, alice.address, {
       now: NOW,
@@ -292,7 +292,7 @@ describe("verifyProposal with excluded set", () => {
     const proposal = buildProposal(HUB, 0n, net(ious, { now: NOW, hub: HUB }));
     const check = verifyProposal(HUB, proposal, ious, alice.address, {
       now: NOW,
-      pendingConsumedIds: new Set<Hex>([proposal.consumedIds[0]]),
+      pendingConsumedIds: new Set<Hex>([proposal.consumed[0].id]),
     });
     expect(check.ok).toBe(false);
     expect(check.reason).toMatch(/outstanding unconfirmed consent/);
@@ -320,7 +320,7 @@ function fakeProposal(participants: Address[]): RoundProposal {
     deltas: participants.map(() => 0n),
     manifestHash: ("0x" + "00".repeat(32)) as Hex,
     digest: ("0x" + "00".repeat(32)) as Hex,
-    consumedIds: [],
+    consumed: [],
   };
 }
 
@@ -606,12 +606,12 @@ describe("two-pass state machine", () => {
     if (o1.outcome !== "settled") return;
     expect(o1.passCount).toBe(2);
     expect(o1.excluded.map((x) => x.toLowerCase())).toEqual([e.address.toLowerCase()]);
-    const manifestN = o1.proposal.consumedIds.map((id) => id.toLowerCase());
+    const manifestN = consumedIds(o1.proposal.consumed).map((id) => id.toLowerCase());
     // e's (and cascaded d's) IOUs stay open — absent from manifest n.
     expect(manifestN).not.toContain(ious[3].id.toLowerCase());
     expect(manifestN).not.toContain(ious[4].id.toLowerCase());
     // Mimic the coordinator: consumed ids join settledIds ONLY now.
-    for (const id of o1.proposal.consumedIds) settledIds.add(id.toLowerCase() as Hex);
+    for (const c of o1.proposal.consumed) settledIds.add(c.id.toLowerCase() as Hex);
     expect(settledIds.has(ious[3].id.toLowerCase() as Hex)).toBe(false);
     expect(settledIds.has(ious[4].id.toLowerCase() as Hex)).toBe(false);
 
@@ -630,7 +630,7 @@ describe("two-pass state machine", () => {
     });
     expect(o2.outcome).toBe("settled");
     if (o2.outcome !== "settled") return;
-    const manifestN1 = o2.proposal.consumedIds.map((id) => id.toLowerCase());
+    const manifestN1 = consumedIds(o2.proposal.consumed).map((id) => id.toLowerCase());
     expect(manifestN1).toContain(ious[3].id.toLowerCase());
     expect(manifestN1).toContain(ious[4].id.toLowerCase());
     // manifest_n ∩ manifest_{n+1} === ∅ (CONS-04).
@@ -659,8 +659,8 @@ describe("two-pass state machine", () => {
             submit: s1.submit,
           });
           if (o1.outcome === "settled") {
-            manifests.push(o1.proposal.consumedIds.map((id) => id.toLowerCase()));
-            for (const id of o1.proposal.consumedIds) settledIds.add(id.toLowerCase() as Hex);
+            manifests.push(consumedIds(o1.proposal.consumed).map((id) => id.toLowerCase()));
+            for (const c of o1.proposal.consumed) settledIds.add(c.id.toLowerCase() as Hex);
           }
 
           const p2 = mkProviders(ACCOUNTS, {}, HUB, ious, settledIds, { now: NOW });
@@ -676,7 +676,7 @@ describe("two-pass state machine", () => {
             submit: s2.submit,
           });
           if (o2.outcome === "settled") {
-            manifests.push(o2.proposal.consumedIds.map((id) => id.toLowerCase()));
+            manifests.push(consumedIds(o2.proposal.consumed).map((id) => id.toLowerCase()));
           }
 
           if (manifests.length === 2) {

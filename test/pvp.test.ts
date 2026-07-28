@@ -8,7 +8,7 @@ import type { Account } from "viem/accounts";
 import type { Address, Hex } from "viem";
 import { ARC_TESTNET_CHAIN_ID } from "../src/domain.js";
 import { signIou } from "../src/iou.js";
-import { net } from "../src/netting.js";
+import { consumedIds, net } from "../src/netting.js";
 import { buildProposal } from "../src/round.js";
 import {
   buildPvPProposal,
@@ -45,7 +45,7 @@ function fakeLeg(digest: Hex): RoundProposal {
     deltas: [],
     manifestHash: ("0x" + "00".repeat(32)) as Hex,
     digest,
-    consumedIds: [],
+    consumed: [],
   };
 }
 
@@ -338,7 +338,7 @@ describe("verifyPvPProposal", () => {
     const aliceLc = alice.address.toLowerCase();
     expect(proposal.usdcLeg.participants.some((p) => p.toLowerCase() === aliceLc)).toBe(true);
     expect(proposal.eurcLeg.participants.some((p) => p.toLowerCase() === aliceLc)).toBe(false);
-    expect(proposal.eurcLeg.consumedIds.map((i) => i.toLowerCase())).not.toContain(
+    expect(consumedIds(proposal.eurcLeg.consumed).map((i) => i.toLowerCase())).not.toContain(
       fxE.id.toLowerCase(),
     );
     // Pre-fix this returned { ok: true } — alice would sign away her USDC

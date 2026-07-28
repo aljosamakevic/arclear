@@ -2,8 +2,9 @@ import { describe, expect, it } from "vitest";
 import { privateKeyToAccount } from "viem/accounts";
 import type { Address, Hex, PublicClient, WalletClient } from "viem";
 import { iouId, signIou, verifyIou } from "../src/iou.js";
-import { net } from "../src/netting.js";
-import { buildProposal, verifyProposal } from "../src/round.js";
+import { consumedIds, net } from "../src/netting.js";
+import { buildProposal, consumedRefs, manifestHash, roundDigest, verifyProposal } from "../src/round.js";
+import { manifestLeafId } from "../src/merkle.js";
 import type { HubClient } from "../src/client.js";
 import type { Iou, SignedIou } from "../src/types.js";
 import { Coordinator } from "../demo/coordinator.js";
@@ -70,7 +71,7 @@ describe("CR-01: SignedIou.id is never trusted", () => {
     const forged: SignedIou = { ...a, id: FORGED_ID };
 
     const result = net([forged, b], { now: NOW, hub: HUB });
-    const ids = result.consumedIds.map((i) => i.toLowerCase());
+    const ids = consumedIds(result.consumed).map((i) => i.toLowerCase());
     expect(ids).toContain(a.id.toLowerCase()); // the id redeemIOU will recompute
     expect(ids).not.toContain(FORGED_ID); // the id Bob wanted committed
     // Deltas are unaffected — the attack was always invisible in the money.
@@ -94,8 +95,9 @@ describe("CR-01: SignedIou.id is never trusted", () => {
     // reachable via the explicit opt-out) builds exactly the audit's proposal.
     const trusting = net([forged, b], { now: NOW, unsafeTrustProvidedIds: true });
     const proposal = buildProposal(HUB, 0n, trusting);
-    expect(proposal.consumedIds.map((i) => i.toLowerCase())).toContain(FORGED_ID);
-    expect(proposal.consumedIds.map((i) => i.toLowerCase())).not.toContain(a.id.toLowerCase());
+    const proposedIds = consumedIds(proposal.consumed).map((i) => i.toLowerCase());
+    expect(proposedIds).toContain(FORGED_ID);
+    expect(proposedIds).not.toContain(a.id.toLowerCase());
 
     // Alice's delta is IDENTICAL either way, so the delta check cannot catch
     // this — the id-presence check is what refuses.
@@ -162,5 +164,126 @@ describe("CR-01: SignedIou.id is never trusted", () => {
     // Alice never saw `theirs`, yet it is in the round — she still consents.
     const proposal = buildProposal(HUB, 0n, net([mine, theirs], { now: NOW, hub: HUB }));
     expect(verifyProposal(HUB, proposal, [mine], alice.address, { now: NOW }).ok).toBe(true);
+  });
+});
+
+/**
+ * v3 CR-01: the manifest leaf binds the PARTIES, not just the id.
+ *
+ * V2 committed a bare id, so a manifest entry said nothing about whose
+ * obligation it was. That is what let anyone poison a victim's id into a
+ * manifest and permanently defeat its redemption. ClearingHubV3 commits
+ * `manifestLeafId(id, lo, hi)` and keys its consumption ledger on that leaf,
+ * which moves the attack off-chain: a coordinator can no longer make the CHAIN
+ * mark our paper consumed, but it can still hand US a proposal that LOOKS like
+ * it consumes our paper while committing a leaf the hub will never write for
+ * us. If we sign that, our obligation stays live under a round that claims to
+ * have netted it. The refusals below are what stop it.
+ */
+describe("v3 CR-01: the manifest leaf binds both parties", () => {
+  /** Rebuild a proposal around a tampered consumed set, keeping the manifest
+   *  root and digest internally consistent — so ONLY the party binding can
+   *  fire, never a stale-hash mismatch. */
+  const reseal = (
+    base: Awaited<ReturnType<typeof buildProposal>>,
+    consumed: typeof base.consumed,
+  ) => {
+    const p = { ...base, consumed, manifestHash: manifestHash(consumed) };
+    return { ...p, digest: roundDigest(HUB, p) };
+  };
+
+  it("refuses a manifest carrying OUR id under a foreign party pair", async () => {
+    const a = await sign(iou(alice.address, bob.address, 100n), alice);
+    const pad = await sign(iou(bob.address, carol.address, 7n, 3n), bob);
+    const honest = buildProposal(HUB, 0n, net([a, pad], { now: NOW, hub: HUB }));
+    // Sanity: the honest proposal is acceptable to Alice.
+    expect(verifyProposal(HUB, honest, [a, pad], alice.address, { now: NOW }).ok).toBe(true);
+
+    // Re-attribute Alice's obligation to bob/carol — the ids match, the deltas
+    // match, and the manifest is self-consistent. Only the pair is a lie.
+    const poisoned = honest.consumed.map((c) =>
+      c.id.toLowerCase() === a.id.toLowerCase()
+        ? {
+            id: c.id,
+            debtor: bob.address,
+            creditor: carol.address,
+            leafId: manifestLeafId(c.id, bob.address, carol.address),
+          }
+        : c,
+    );
+    const forged = reseal(honest, [...poisoned].sort((x, y) => (x.leafId < y.leafId ? -1 : 1)));
+
+    const check = verifyProposal(HUB, forged, [a, pad], alice.address, { now: NOW });
+    expect(check.ok).toBe(false);
+    // Alice's OWN leaf is what is missing — the id being present is irrelevant.
+    expect(check.reason).toMatch(/missing from the proposal manifest/);
+    expect(check.reason).toContain(a.id.toLowerCase());
+  });
+
+  it("refuses an entry whose cached leafId does not bind its stated parties", async () => {
+    // The cache is derived data (like SignedIou.id) and is equally worthless as
+    // input. Left unchecked, the omission check reads leaves and would compare
+    // against a leaf nobody can reproduce.
+    const a = await sign(iou(alice.address, bob.address, 100n), alice);
+    const honest = buildProposal(HUB, 0n, net([a], { now: NOW, hub: HUB }));
+    const lying = honest.consumed.map((c) => ({ ...c, leafId: ("0x" + "ee".repeat(32)) as Hex }));
+    const forged = { ...honest, consumed: lying };
+
+    const check = verifyProposal(HUB, forged, [a], alice.address, { now: NOW });
+    expect(check.ok).toBe(false);
+    expect(check.reason).toMatch(/leafId does not bind the stated parties/);
+  });
+
+  it("refuses an entry naming a party who is not a participant", async () => {
+    // Unrepresentable on-chain: refs index INTO participants, so such an entry
+    // could only ever revert PartyIndexOutOfRange. Refusing here means a member
+    // never signs a round that is structurally incapable of executing.
+    const a = await sign(iou(alice.address, bob.address, 100n), alice);
+    const honest = buildProposal(HUB, 0n, net([a], { now: NOW, hub: HUB }));
+    const outsider = "0x9999999999999999999999999999999999999999" as Address;
+    const forged = reseal(
+      honest,
+      honest.consumed.map((c) => ({
+        ...c,
+        creditor: outsider,
+        leafId: manifestLeafId(c.id, c.debtor, outsider),
+      })),
+    );
+
+    const check = verifyProposal(HUB, forged, [a], alice.address, { now: NOW });
+    expect(check.ok).toBe(false);
+    expect(check.reason).toMatch(/is not a participant/);
+  });
+
+  it("consumedRefs resolves parties to indices and refuses what the hub would", async () => {
+    const a = await sign(iou(alice.address, bob.address, 100n), alice);
+    const pad = await sign(iou(bob.address, carol.address, 7n, 3n), bob);
+    const proposal = buildProposal(HUB, 0n, net([a, pad], { now: NOW, hub: HUB }));
+    const refs = consumedRefs(proposal.participants, proposal.consumed);
+
+    expect(refs).toHaveLength(proposal.consumed.length);
+    refs.forEach((r, i) => {
+      const entry = proposal.consumed[i];
+      // Index resolution must round-trip back to the exact committed leaf —
+      // this is precisely the derivation executeRound performs on-chain.
+      expect(
+        manifestLeafId(
+          r.id,
+          proposal.participants[r.partyAIdx],
+          proposal.participants[r.partyBIdx],
+        ),
+      ).toBe(entry.leafId);
+      expect(r.partyAIdx).not.toBe(r.partyBIdx); // hub reverts SelfConsumedRef
+    });
+
+    // Refs stay in manifest order: reordering them would break the hub's
+    // ascent-by-leaf requirement and the root would not match the signed one.
+    expect(refs.map((r) => r.id)).toEqual(proposal.consumed.map((c) => c.id));
+
+    // A party outside the participant set is a caller bug, and this is a
+    // submitter-side builder, so it throws rather than returning { ok, reason }.
+    expect(() =>
+      consumedRefs([alice.address], proposal.consumed),
+    ).toThrow(/is not a participant/);
   });
 });

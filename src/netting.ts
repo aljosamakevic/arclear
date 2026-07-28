@@ -1,6 +1,7 @@
 import type { Address, Hex } from "viem";
 import { iouId } from "./iou.js";
-import type { NetResult, SignedIou } from "./types.js";
+import { manifestLeafId } from "./merkle.js";
+import type { ConsumedIou, NetResult, SignedIou } from "./types.js";
 
 /**
  * How `net()` establishes each IOU's id. Exactly one of the two shapes is
@@ -34,10 +35,18 @@ export type NetIdBinding =
  * 5. Participants sorted ascending by address (lowercase hex order).
  * 6. A participant stays in the round (with delta possibly 0) iff at least one
  *    of their IOUs was consumed — consent is what extinguishes their paper.
- *    Addresses with no consumed IOUs never appear.
- * 7. `consumedIds` sorted ascending — the manifest preimage.
+ *    Addresses with no consumed IOUs never appear. This is also what makes
+ *    every consumed IOU's parties indexable as `ConsumedRef`s (v3 CR-01):
+ *    both parties of a consumed IOU are always in `participants`.
+ * 7. `consumed` sorted ascending BY DERIVED LEAF (`manifestLeafId`), NOT by
+ *    raw id — that is the order `ManifestMerkle.rootOf` sees on-chain (v3).
  *
  * Output invariant: deltas sum to exactly 0n.
+ *
+ * `settledIds`/`redeemedIds` stay keyed by RAW id, not by leaf. Redemption's
+ * on-chain nullifier is raw-id-keyed, and `id -> leafId` is a function (the id
+ * is `hashIou`, which already fixes both parties), so raw-id bookkeeping is
+ * both equivalent and the more conservative of the two.
  */
 export function net(
   ious: SignedIou[],
@@ -56,7 +65,7 @@ export function net(
   const seen = new Set<Hex>();
   const positions = new Map<string, bigint>(); // lowercase address -> delta
   const original = new Map<string, Address>(); // lowercase -> checksummed
-  const consumedIds: Hex[] = [];
+  const consumed: ConsumedIou[] = [];
   let grossVolume = 0n;
 
   for (const s of ious) {
@@ -77,17 +86,33 @@ export function net(
     positions.set(creditor, (positions.get(creditor) ?? 0n) + s.iou.amount);
     original.set(debtor, s.iou.debtor);
     original.set(creditor, s.iou.creditor);
-    consumedIds.push(id);
+    // rule 7 preimage: the leaf is party-bound, so the manifest can only ever
+    // commit an obligation together with the two addresses it actually binds.
+    consumed.push({
+      id,
+      debtor: s.iou.debtor,
+      creditor: s.iou.creditor,
+      leafId: manifestLeafId(id, s.iou.debtor, s.iou.creditor),
+    });
     grossVolume += s.iou.amount;
   }
 
   const sortedAddrs = [...positions.keys()].sort(); // rule 5 (hex lexicographic == numeric)
   const participants = sortedAddrs.map((a) => original.get(a)!);
   const deltas = sortedAddrs.map((a) => positions.get(a)!);
-  consumedIds.sort(); // rule 7
+  // rule 7: ascending by DERIVED LEAF. Distinct ids can never collide here —
+  // leafId covers the id — so the comparison is total and the result unique.
+  consumed.sort((a, b) => (a.leafId < b.leafId ? -1 : a.leafId > b.leafId ? 1 : 0));
 
   let settledVolume = 0n;
   for (const d of deltas) if (d > 0n) settledVolume += d;
 
-  return { participants, deltas, consumedIds, settledVolume, grossVolume };
+  return { participants, deltas, consumed, settledVolume, grossVolume };
+}
+
+/** Convenience projection: the raw ids of a consumed set, in manifest order.
+ *  Raw ids are what `settledIds`/`redeemedIds` and the hub's `redeemed`
+ *  nullifier are keyed on; leaves are what the manifest is keyed on. */
+export function consumedIds(consumed: readonly ConsumedIou[]): Hex[] {
+  return consumed.map((c) => c.id);
 }

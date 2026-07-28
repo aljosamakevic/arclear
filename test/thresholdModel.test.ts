@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import type { Hex } from "viem";
-import { net } from "../src/netting.js";
+import { consumedIds, net } from "../src/netting.js";
 import type { SignedIou } from "../src/types.js";
 import {
   availabilityUniforms,
@@ -56,8 +56,8 @@ describe("thresholdModel attemptRound-mirroring behaviors", () => {
       expect(rec.excluded).toEqual([]);
       expect(rec.settledVolume).toBe(direct.settledVolume);
       expect(rec.grossVolume).toBe(direct.grossVolume);
-      expect(rec.consumedCount).toBe(direct.consumedIds.length);
-      for (const id of direct.consumedIds) settledIds.add(id);
+      expect(rec.consumedCount).toBe(direct.consumed.length);
+      for (const id of consumedIds(direct.consumed)) settledIds.add(id);
     });
     expect(h.excludedLatencies).toEqual([]);
     expect(h.unsettledCount).toBe(0);

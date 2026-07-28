@@ -14,15 +14,15 @@ import {
 } from "viem";
 import { arcTestnet, MIN_MAX_FEE_PER_GAS, USDC } from "../src/domain.js";
 import { HubClient, PvPRouterClient } from "../src/client.js";
-import { clearingHubV2Abi, clearingHubV2Bytecode } from "../src/abi/ClearingHubV2.js";
-import { pvpRouterBytecode, pvpRouterAbi } from "../src/abi/PvPRouter.js";
+import { clearingHubV3Abi, clearingHubV3Bytecode } from "../src/abi/ClearingHubV3.js";
+import { pvpRouterV3Bytecode, pvpRouterV3Abi } from "../src/abi/PvPRouterV3.js";
 import { mockTokenAbi, mockTokenBytecode } from "./mockToken.js";
 import { agents, relayer, ANVIL_MNEMONIC, type AgentPersona } from "./agents.js";
 
 export interface DemoEnv {
   chain: Chain;
   pub: PublicClient;
-  /** USDC-side ClearingHubV2 (the original single-hub surface, unchanged). */
+  /** USDC-side ClearingHubV3 — the single supported hub (V2 is superseded). */
   hub: Address;
   /** USDC token (mock on anvil; the native-USDC ERC-20 facade on Arc). */
   token: Address;
@@ -30,11 +30,11 @@ export interface DemoEnv {
   hubClient: HubClient;
   /** EURC stand-in token (second mock on anvil; live EURC on Arc). */
   tokenEurc: Address;
-  /** EURC-side ClearingHubV2 — per-hub state is strictly separate (Pitfall 3). */
+  /** EURC-side ClearingHubV3 — per-hub state is strictly separate (Pitfall 3). */
   hubEurc: Address;
   /** Typed client for the EURC hub — never share reads with hubClient. */
   hubClientEurc: HubClient;
-  /** PvPRouter bound at deploy time to exactly (hub, hubEurc). */
+  /** PvPRouterV3 bound at deploy time to exactly (hub, hubEurc). */
   router: Address;
   /** Typed router client — formula-gas executePvP submission. */
   routerClient: PvPRouterClient;
@@ -98,7 +98,7 @@ async function depositAll(
     }
     const depositHash = await wallet.writeContract({
       address: target.hub,
-      abi: clearingHubV2Abi,
+      abi: clearingHubV3Abi,
       functionName: "deposit",
       args: [collateralAmount],
       chain: env.chain,
@@ -118,7 +118,7 @@ async function depositAll(
 
 /**
  * Local mode: spawn anvil, deploy a dual-hub world — two mock tokens (USDC +
- * EURC stand-ins), two ClearingHubV2s, one PvPRouter bound to both — then
+ * EURC stand-ins), two ClearingHubV3s, one PvPRouterV3 bound to both — then
  * mint both tokens to every agent and deposit collateral on BOTH hubs.
  */
 export async function setupAnvil(): Promise<DemoEnv> {
@@ -143,13 +143,14 @@ export async function setupAnvil(): Promise<DemoEnv> {
     return (await pub.waitForTransactionReceipt({ hash: tx })).contractAddress!;
   };
 
-  /** Deploy one ClearingHubV2 bound to `tokenAddr`; returns its address. */
+  /** Deploy one ClearingHubV3 bound to `tokenAddr`; returns its address. */
   const deployHub = async (tokenAddr: Address): Promise<Address> => {
     const tx = await wallet.deployContract({
-      abi: clearingHubV2Abi,
-      bytecode: clearingHubV2Bytecode,
-      // K/RING/MAX_IOU_LIFETIME: the same UNCALIBRATED defaults as DeployV2.s.sol.
-      args: [tokenAddr, 3n, 16n, 86_400n],
+      abi: clearingHubV3Abi,
+      bytecode: clearingHubV3Bytecode,
+      // K only: V3 deleted the RING and MAX_IOU_LIFETIME immutables along with
+      // the root-ring regime (CR-02). Same UNCALIBRATED K as DeployV3.s.sol.
+      args: [tokenAddr, 3n],
       account: deployer,
       chain,
     });
@@ -164,8 +165,8 @@ export async function setupAnvil(): Promise<DemoEnv> {
   // Router immutables pin the exact hub pair — the anvil world mirrors the
   // testnet deployment shape one-for-one.
   const routerTx = await wallet.deployContract({
-    abi: pvpRouterAbi,
-    bytecode: pvpRouterBytecode,
+    abi: pvpRouterV3Abi,
+    bytecode: pvpRouterV3Bytecode,
     args: [hub, hubEurc],
     account: deployer,
     chain,
@@ -207,22 +208,23 @@ export async function setupAnvil(): Promise<DemoEnv> {
 }
 
 /**
- * Testnet mode: attach to a deployed V2 hub (HUB_V2_USDC env), derive agents
+ * Testnet mode: attach to a deployed V3 hub (HUB_V3_USDC env), derive agents
  * from AGENT_MNEMONIC, top up their USDC from the deployer if needed. On Arc,
  * USDC is the native gas token with an ERC-20 facade, so one transfer funds
- * both gas and collateral. The v1 HUB_USDC key stays reserved for Arclear Net.
+ * both gas and collateral. The v1 HUB_USDC and v2 HUB_V2_* keys stay reserved
+ * for those still-live deployments; the demo reads neither.
  */
 export async function setupTestnet(): Promise<DemoEnv> {
-  const hub = process.env.HUB_V2_USDC as Address | undefined;
-  const hubEurc = process.env.HUB_V2_EURC as Address | undefined;
-  const router = process.env.PVP_ROUTER as Address | undefined;
+  const hub = process.env.HUB_V3_USDC as Address | undefined;
+  const hubEurc = process.env.HUB_V3_EURC as Address | undefined;
+  const router = process.env.PVP_ROUTER_V3 as Address | undefined;
   const mnemonic = process.env.AGENT_MNEMONIC;
   const deployerPk = process.env.DEPLOYER_PK;
-  if (!hub) throw new Error("HUB_V2_USDC not set — deploy ClearingHubV2 first (see README)");
+  if (!hub) throw new Error("HUB_V3_USDC not set — deploy ClearingHubV3 first (see README)");
   if (!hubEurc) {
-    throw new Error("HUB_V2_EURC not set — deploy the EURC ClearingHubV2 first (see README)");
+    throw new Error("HUB_V3_EURC not set — deploy the EURC ClearingHubV3 first (see README)");
   }
-  if (!router) throw new Error("PVP_ROUTER not set — deploy PvPRouter first (see README)");
+  if (!router) throw new Error("PVP_ROUTER_V3 not set — deploy PvPRouterV3 first (see README)");
   if (!mnemonic) throw new Error("AGENT_MNEMONIC not set");
   if (!deployerPk) throw new Error("DEPLOYER_PK not set");
 
@@ -234,13 +236,13 @@ export async function setupTestnet(): Promise<DemoEnv> {
   const wallet = createWalletClient({ account: deployer, chain, transport: http() });
 
   // Event-scan floor: the public Arc RPC prunes old history and rejects
-  // eth_getLogs from genesis ("pruned history unavailable"). Use the V2 USDC
-  // hub's deploy block when known (HUB_V2_DEPLOY_BLOCK, decimal — the EURC
+  // eth_getLogs from genesis ("pruned history unavailable"). Use the V3 USDC
+  // hub's deploy block when known (HUB_V3_DEPLOY_BLOCK, decimal — the EURC
   // hub deployed a few blocks later in the same broadcast session, so the
   // USDC deploy block floors both hubs). Unset → latest − 1,000,000 clamped
   // to ≥ 0: a pragmatic floor, far deeper than any live demo state yet
   // shallow enough for the RPC's retention window.
-  const deployBlockEnv = process.env.HUB_V2_DEPLOY_BLOCK;
+  const deployBlockEnv = process.env.HUB_V3_DEPLOY_BLOCK;
   let earliestBlock: bigint;
   if (deployBlockEnv !== undefined && deployBlockEnv !== "") {
     earliestBlock = BigInt(deployBlockEnv);

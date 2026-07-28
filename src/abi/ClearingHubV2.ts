@@ -1,4 +1,22 @@
-/** ABI + creation bytecode for ClearingHubV2, pasted from contracts/out after `forge build`. */
+/**
+ * ABI + creation bytecode for ClearingHubV2, pasted from contracts/out after
+ * `forge build`.
+ *
+ * SUPERSEDED — not on any live path. The SDK targets ClearingHubV3 everywhere;
+ * V2's redemption is defeatable (audit CR-01 manifest poisoning, CR-02
+ * root-ring flush), which is the reason V3 exists.
+ *
+ * This module is retained for exactly one purpose: `demo/e2e.ts` compares the
+ * deployed hub's CBOR metadata tail against BOTH artifacts, so it can assert
+ * "this is genuinely V3" rather than merely "this responds to V3-shaped
+ * reads". V2 and V3 overlap on every read the e2e performs, so without a
+ * negative comparison a run against a V2 hub would pass every assertion up to
+ * the redemption scenario — which is precisely the confusion worth catching.
+ *
+ * The v1 ClearingHub and V2 PvPRouter ABI modules were deleted in the v3
+ * migration: nothing referenced them once the e2e's bytecode guard moved to
+ * discriminating V3 from V2.
+ */
 export const clearingHubV2Abi = [
   {
     "type": "constructor",

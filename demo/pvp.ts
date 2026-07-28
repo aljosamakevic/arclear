@@ -1,6 +1,6 @@
 import { keccak256, stringToHex, type Address, type Hex, type WalletClient } from "viem";
 import type { Account } from "viem/accounts";
-import { net } from "../src/netting.js";
+import { consumedIds, net } from "../src/netting.js";
 import { buildProposal, rebuildProposal } from "../src/round.js";
 import { signIou } from "../src/iou.js";
 import {
@@ -583,7 +583,7 @@ export type PvPRunResult =
  * broadcasting, and classify any submission failure from chain state — first
  * by matching each hub's RoundExecuted digest ("did OUR tx mine?"), then from
  * the two chains' nonces — never from error strings (WR-02). On settlement
- * each hub's settledIds absorbs ONLY its own leg's consumedIds and both
+ * each hub's settledIds absorbs ONLY its own leg's consumed ids and both
  * coordinators' rounds gain a PvP-tagged entry (per-hub state stays separate,
  * Pitfall 3).
  *
@@ -652,7 +652,7 @@ export async function runPvPRound(deps: PvPRunDeps): Promise<PvPRunResult> {
           participants: leg.participants.length,
           grossVolume: result.grossVolume.toString(),
           settledVolume: result.settledVolume.toString(),
-          iouCount: leg.consumedIds.length,
+          iouCount: leg.consumed.length,
           deltas,
           excluded: excluded.map((a) => a.toLowerCase()),
           passCount,
@@ -663,11 +663,11 @@ export async function runPvPRound(deps: PvPRunDeps): Promise<PvPRunResult> {
       // hub-domain-separated by construction).
       const roundU = legRound(proposal.usdcLeg, results.usdc);
       const roundE = legRound(proposal.eurcLeg, results.eurc);
-      for (const id of proposal.usdcLeg.consumedIds) {
-        usdc.state.settledIds.add(id.toLowerCase() as Hex);
+      for (const c of proposal.usdcLeg.consumed) {
+        usdc.state.settledIds.add(c.id.toLowerCase() as Hex);
       }
-      for (const id of proposal.eurcLeg.consumedIds) {
-        eurc.state.settledIds.add(id.toLowerCase() as Hex);
+      for (const c of proposal.eurcLeg.consumed) {
+        eurc.state.settledIds.add(c.id.toLowerCase() as Hex);
       }
       usdc.state.rounds.push(roundU);
       eurc.state.rounds.push(roundE);
@@ -704,13 +704,13 @@ export async function runPvPRound(deps: PvPRunDeps): Promise<PvPRunResult> {
           usdc: {
             roundNonce: proposal.usdcLeg.roundNonce,
             digest: proposal.usdcLeg.digest,
-            consumedIds: proposal.usdcLeg.consumedIds,
+            consumedIds: consumedIds(proposal.usdcLeg.consumed),
             sentAtBlock,
           },
           eurc: {
             roundNonce: proposal.eurcLeg.roundNonce,
             digest: proposal.eurcLeg.digest,
-            consumedIds: proposal.eurcLeg.consumedIds,
+            consumedIds: consumedIds(proposal.eurcLeg.consumed),
             sentAtBlock,
           },
         };

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
 import { keccak256, toHex, type Address, type Hex } from "viem";
-import { net } from "../src/netting.js";
+import { consumedIds, net } from "../src/netting.js";
 import type { SignedIou } from "../src/types.js";
 
 const NOW = 1_800_000_000n;
@@ -102,7 +102,7 @@ describe("netting engine properties", () => {
     const a = fakeIou(ADDRS[0], ADDRS[1], 5n, 1n);
     const b = fakeIou(ADDRS[1], ADDRS[0], 3n, 1n);
     const r = net([a, b], { now: NOW, ...UNBOUND, settledIds: new Set([a.id]) });
-    expect(r.consumedIds).toEqual([b.id.toLowerCase()]);
+    expect(consumedIds(r.consumed)).toEqual([b.id.toLowerCase()]);
     expect(r.grossVolume).toBe(3n);
   });
 

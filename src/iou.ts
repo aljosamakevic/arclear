@@ -71,11 +71,11 @@ export function checkIouLifetime(
 
 /**
  * Debtor signs the IOU. `account` must control `iou.debtor`. Refuses to sign
- * past the L-convention (`expiry <= now + L`): honoring it means every round
- * consuming this IOU executes inside [expiry − L, expiry), which is exactly
- * what makes the hub's redemption coverage rule complete for honest debtors —
- * a debtor violating the convention weakens only their own double-claim
- * protection.
+ * past the L-convention (`expiry <= now + L`) — an off-chain hygiene bound
+ * only under v3, which deleted the coverage rule the convention used to serve
+ * (see DEFAULT_MAX_IOU_LIFETIME_SECONDS). Violating it no longer weakens the
+ * debtor's redemption protection; it only widens the window in which their
+ * collateral must stay sufficient.
  */
 export async function signIou(
   hub: Address,
@@ -110,10 +110,10 @@ export async function signIou(
  * that IOU actually has.
  *
  * CR-01: the signature covers the IOU struct only, so a valid signature says
- * nothing about the accompanying `id` — and the id is what becomes the
- * manifest leaf (and therefore what the hub's non-inclusion regime treats as
- * "already settled"). A forged id lets the same signed IOU be settled in a
- * round AND later redeemed via redeemIOU, debiting the debtor twice. The id is
+ * nothing about the accompanying `id` — and the id is what the manifest leaf
+ * is derived FROM (and what the hub's `redeemed` nullifier is keyed on). A
+ * forged id lets the same signed IOU be settled in a round under a leaf nobody
+ * reads AND later redeemed via redeemIOU, debiting the debtor twice. The id is
  * derived, never asserted (src/types.ts), so re-deriving it here is what makes
  * "verified" mean the whole object.
  */

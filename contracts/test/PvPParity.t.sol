@@ -3,18 +3,18 @@ pragma solidity 0.8.26;
 
 import {Test} from "forge-std/Test.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
-import {PvPRouter} from "../src/PvPRouter.sol";
+import {PvPRouterV3} from "../src/PvPRouterV3.sol";
 
 /// @dev D-05 obligation for the new PvPRound signed struct: the Solidity side
 ///      of the shared-fixture lock. Reads the same regenerated JSON vector as
 ///      the SDK's fixture-lock test (test/pvp.test.ts) and asserts that
-///      PvPRouter.hashPvPRound reproduces viem's pvpDigest byte-for-byte and
+///      PvPRouterV3.hashPvPRound reproduces viem's pvpDigest byte-for-byte and
 ///      that the fixture signer's viem consent recovers on-chain via OZ ECDSA.
 ///      Vectors come exclusively from the fixture — never hand-edited, never
 ///      hardcoded here (regeneration-only discipline, T-04-13).
 contract PvPParityTest is Test {
     string internal json;
-    PvPRouter internal router;
+    PvPRouterV3 internal router;
 
     function setUp() public {
         json = vm.readFile("../test/fixtures/digest.json");
@@ -26,13 +26,21 @@ contract PvPParityTest is Test {
 
         // Recreate the fixture's exact domain: chain 5042002, router at the
         // fixture address. deployCodeTo runs the constructor so the hub-pair
-        // immutables are set correctly (pattern proven by ClearingHubV2Parity's
-        // K/RING constructor args). No hub code needs to exist at the fixture
-        // hub addresses — the constructor only STORES them and hashPvPRound
-        // never calls a hub.
+        // immutables are set correctly. No hub code needs to exist at the
+        // fixture hub addresses — the constructor only STORES them and
+        // hashPvPRound never calls a hub.
+        //
+        // Repointed from PvPRouter to PvPRouterV3 in Wave B: the SDK now signs
+        // in the ("ArclearPvPRouterV3", "1") domain, so pinning the fixture
+        // against the V2 router would assert parity with a contract the SDK no
+        // longer speaks to. PVP_ROUND_TYPEHASH is byte-identical between the
+        // two routers; only the domain separator differs, which is exactly what
+        // this vector now locks.
         vm.chainId(chainId);
-        deployCodeTo("PvPRouter.sol:PvPRouter", abi.encode(hubUsdcAddr, hubEurcAddr), routerAddr);
-        router = PvPRouter(routerAddr);
+        deployCodeTo(
+            "PvPRouterV3.sol:PvPRouterV3", abi.encode(hubUsdcAddr, hubEurcAddr), routerAddr
+        );
+        router = PvPRouterV3(routerAddr);
     }
 
     /// @dev The two D-05 assertions, mirroring ClearingHubV2Parity: digest

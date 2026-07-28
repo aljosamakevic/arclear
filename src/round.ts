@@ -7,18 +7,65 @@ import {
 import type { Account } from "viem/accounts";
 import { domain, ROUND_TYPES } from "./domain.js";
 import { iouId } from "./iou.js";
-import { merkleRoot } from "./merkle.js";
+import { manifestLeafId, merkleRoot } from "./merkle.js";
 import { net } from "./netting.js";
-import type { NetResult, RoundProposal, SignedIou } from "./types.js";
+import type {
+  ConsumedIou,
+  ConsumedRef,
+  NetResult,
+  RoundProposal,
+  SignedIou,
+} from "./types.js";
 
 /**
- * v2 manifest commitment: the sorted-leaf merkle root over the consumed-IOU-id
- * list (construction spec: src/merkle.ts numbered rules / docs/PROTOCOL.md).
- * Same bytes32 field and Round EIP-712 struct as v1 — only the preimage
- * changed; the empty manifest still commits to keccak256("0x") (D-04).
+ * v3 manifest commitment: the sorted-leaf merkle root over the PARTY-BOUND
+ * leaves of the consumed set (construction spec: src/merkle.ts numbered rules
+ * / docs/PROTOCOL.md). Same bytes32 field and Round EIP-712 struct as v1/v2 —
+ * only the preimage changed again; the empty manifest still commits to
+ * keccak256("0x") (D-04), so empty-round digests are unchanged across all
+ * three versions.
+ *
+ * The leaves are recomputed here from each entry's `(id, debtor, creditor)`
+ * rather than read from its `leafId` cache: this is the function every
+ * verifier reaches for, and a cached leaf is exactly the kind of derived field
+ * that must never be trusted (CR-01). `merkleRoot` then enforces strict ascent
+ * and uniqueness, which is the same guard `ManifestMerkle.rootOf` applies
+ * on-chain (`UnsortedLeaves`).
  */
-export function manifestHash(sortedIds: Hex[]): Hex {
-  return merkleRoot(sortedIds);
+export function manifestHash(consumed: readonly ConsumedIou[]): Hex {
+  return merkleRoot(consumed.map((c) => manifestLeafId(c.id, c.debtor, c.creditor)));
+}
+
+/**
+ * ABI form of a consumed set for `executeRound` / `executePvP`: each entry's
+ * two parties resolved to their INDICES in `participants`.
+ *
+ * Order is preserved exactly — the hub requires ascent by derived leaf, which
+ * is the order `net()` already produced, and reordering here would silently
+ * break it. A party missing from `participants` is a caller bug (netting rule
+ * 6 guarantees both parties are present), so it throws rather than returning
+ * `{ ok, reason }`: the only callers are submitters that just built the set.
+ */
+export function consumedRefs(
+  participants: readonly Address[],
+  consumed: readonly ConsumedIou[],
+): ConsumedRef[] {
+  const idx = new Map<string, number>();
+  participants.forEach((p, i) => idx.set(p.toLowerCase(), i));
+  return consumed.map((c) => {
+    const a = idx.get(c.debtor.toLowerCase());
+    const b = idx.get(c.creditor.toLowerCase());
+    if (a === undefined) {
+      throw new Error(`consumed id ${c.id}: debtor ${c.debtor} is not a participant`);
+    }
+    if (b === undefined) {
+      throw new Error(`consumed id ${c.id}: creditor ${c.creditor} is not a participant`);
+    }
+    // The hub rejects SelfConsumedRef; no IOU has one party (net() drops
+    // nothing here, but a hand-built set could), so refuse before broadcast.
+    if (a === b) throw new Error(`consumed id ${c.id}: both parties are participant ${a}`);
+    return { id: c.id, partyAIdx: a, partyBIdx: b };
+  });
 }
 
 function roundMessage(p: {
@@ -55,14 +102,14 @@ export function buildProposal(
   result: NetResult,
   chainId?: number,
 ): RoundProposal {
-  const mh = manifestHash(result.consumedIds);
+  const mh = manifestHash(result.consumed);
   const p = {
     roundNonce,
     participants: result.participants,
     deltas: result.deltas,
     manifestHash: mh,
   };
-  return { ...p, digest: roundDigest(hub, p, chainId), consumedIds: result.consumedIds };
+  return { ...p, digest: roundDigest(hub, p, chainId), consumed: result.consumed };
 }
 
 /**
@@ -119,12 +166,14 @@ export function rebuildProposal(
  * *you* read it) and `opts.pendingConsumedIds` (the union of consumedIds
  * across your unconfirmed consents) to refuse such proposals as data.
  *
- * CR-01 — the local recomputation derives every id from (hub, iou); the
- * proposal's own ids are only ever compared against, never adopted. Every id
- * of OURS that our recomputation consumed must be present in the manifest.
+ * CR-01 — the local recomputation derives every id from (hub, iou) and every
+ * manifest leaf from (id, debtor, creditor); the proposal's own ids and cached
+ * leaves are only ever compared against, never adopted. Every obligation of
+ * OURS that our recomputation consumed must be present in the manifest UNDER
+ * ITS OWN PARTY PAIR.
  *
- * CR-04 — total: any malformed proposal (bad consumedIds, out-of-range deltas,
- * non-address participants) is a refusal with a reason, never a throw.
+ * CR-04 — total: any malformed proposal (bad consumed set, out-of-range
+ * deltas, non-address participants) is a refusal with a reason, never a throw.
  */
 export function verifyProposal(
   hub: Address,
@@ -184,11 +233,11 @@ function verifyProposalOrThrow(
   if (opts.pendingConsumedIds !== undefined && opts.pendingConsumedIds.size > 0) {
     const pending = new Set<string>();
     for (const id of opts.pendingConsumedIds) pending.add(id.toLowerCase());
-    for (const id of proposal.consumedIds) {
-      if (pending.has(id.toLowerCase())) {
+    for (const c of proposal.consumed) {
+      if (pending.has(c.id.toLowerCase())) {
         return {
           ok: false,
-          reason: `consumed id ${id} overlaps an outstanding unconfirmed consent — double-settle risk`,
+          reason: `consumed id ${c.id} overlaps an outstanding unconfirmed consent — double-settle risk`,
         };
       }
     }
@@ -222,9 +271,42 @@ function verifyProposalOrThrow(
     };
   }
 
-  // No stranger-id check (IN-01): consumed ids we haven't seen locally are
-  // fine as long as they don't involve us — we can't tell from ids alone, but
-  // our delta already pins the sum of everything that involves us.
+  // v3 CR-01 (structural): every consumed entry must name two DISTINCT parties
+  // that are both listed participants, and its cached `leafId` must be the leaf
+  // those parties actually derive. All three are what the submitter's
+  // `consumedRefs()` and the hub's own derivation will produce, so a mismatch
+  // here is a proposal that could only ever fail on-chain — refuse it as data
+  // instead of paying for a doomed round. Checking the cache is not paranoia:
+  // the omission check below reads leaves, and an unchecked `leafId` would let
+  // a coordinator present a self-consistent-looking manifest whose entries
+  // attribute our paper to somebody else.
+  const participantSet = new Set(proposal.participants.map((p) => p.toLowerCase()));
+  for (const c of proposal.consumed) {
+    const d = c.debtor.toLowerCase();
+    const cr = c.creditor.toLowerCase();
+    if (!participantSet.has(d)) {
+      return { ok: false, reason: `consumed id ${c.id}: debtor ${c.debtor} is not a participant` };
+    }
+    if (!participantSet.has(cr)) {
+      return {
+        ok: false,
+        reason: `consumed id ${c.id}: creditor ${c.creditor} is not a participant`,
+      };
+    }
+    if (d === cr) {
+      return { ok: false, reason: `consumed id ${c.id}: debtor and creditor are the same party` };
+    }
+    if (manifestLeafId(c.id, c.debtor, c.creditor).toLowerCase() !== c.leafId.toLowerCase()) {
+      return {
+        ok: false,
+        reason: `consumed id ${c.id}: leafId does not bind the stated parties`,
+      };
+    }
+  }
+
+  // No stranger-id check (IN-01): consumed leaves we haven't seen locally are
+  // fine as long as they don't involve us — we can't tell from leaves alone,
+  // but our delta already pins the sum of everything that involves us.
   //
   // CR-01 (omission variant): the converse is NOT covered by the delta check.
   // Our delta pins only the SUM of our flows, so a coordinator can drop a pair
@@ -232,20 +314,30 @@ function verifyProposalOrThrow(
   // present the delta we expect. Anything of OURS that our own recomputation
   // consumed must therefore appear in the manifest we are about to sign, or
   // that paper stays live while we consent to a round claiming to consume it.
+  //
+  // v3 strengthens this from ids to LEAVES: matching on the party-bound leaf
+  // additionally rejects a manifest that carries our id under somebody else's
+  // party pair — which commits a leaf the hub will never mark consumed for us,
+  // leaving our obligation live under a round that claims to have netted it.
   const proposed = new Set<string>();
-  for (const id of proposal.consumedIds) proposed.add(id.toLowerCase());
-  const inRound = new Set<string>(recomputed.consumedIds);
+  for (const c of proposal.consumed) proposed.add(c.leafId.toLowerCase());
+  const inRound = new Set<string>();
+  for (const c of recomputed.consumed) inRound.add(c.leafId.toLowerCase());
   for (const s of mine) {
     if (s.iou.debtor.toLowerCase() !== selfLc && s.iou.creditor.toLowerCase() !== selfLc) continue;
-    const id = iouId(hub, s.iou, opts.chainId).toLowerCase();
-    if (!inRound.has(id)) continue; // expired/settled/redeemed locally too
-    if (!proposed.has(id)) {
-      return { ok: false, reason: `my consumed id ${id} is missing from the proposal manifest` };
+    const id = iouId(hub, s.iou, opts.chainId);
+    const leaf = manifestLeafId(id, s.iou.debtor, s.iou.creditor).toLowerCase();
+    if (!inRound.has(leaf)) continue; // expired/settled/redeemed locally too
+    if (!proposed.has(leaf)) {
+      return {
+        ok: false,
+        reason: `my consumed id ${id.toLowerCase()} is missing from the proposal manifest`,
+      };
     }
   }
 
-  if (manifestHash(proposal.consumedIds) !== proposal.manifestHash) {
-    return { ok: false, reason: "manifestHash does not match consumedIds" };
+  if (manifestHash(proposal.consumed) !== proposal.manifestHash) {
+    return { ok: false, reason: "manifestHash does not match the consumed set" };
   }
   const expectedDigest = roundDigest(hub, proposal, opts.chainId);
   if (expectedDigest !== proposal.digest) {
