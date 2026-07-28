@@ -34,9 +34,7 @@ resets on restart — press every button freely.
 
 **[arclear-demo-testnet.fly.dev](https://arclear-demo-testnet.fly.dev)** — the
 **live Arc Testnet** version. Same buttons, but every netting round is a real
-settlement on chain 5042002, paid from faucet funds, against the deployed V3
-hubs listed under [Deployed
-hubs](#deployed-hubs-arc-testnet-chain-5042002) below — each round's tx hash
+settlement on chain 5042002, paid from faucet funds — each round's tx hash
 links straight to [arcscan](https://testnet.arcscan.app). Button presses are
 rate-limited (20 s cooldown) so a curious visitor can't drain the faucet
 budget.
@@ -44,6 +42,15 @@ budget.
 The dashboard and protocol code are identical in both; the difference is real:
 the sandbox settles on a throwaway chain, the testnet view spends actual
 (faucet) USDC on actual blocks.
+
+> **Both hosted apps are currently serving a pre-V3 image** — the testnet view's
+> `/state` reports the V2 USDC hub `0x3b9a…5a16`, not the current V3 hub. They
+> are pending a Fly redeploy plus a secrets update (`HUB_V3_USDC`,
+> `HUB_V3_EURC`, `PVP_ROUTER_V3`, `HUB_V3_DEPLOY_BLOCK`). Until that lands, the
+> hosted views demonstrate v2 behaviour. Everything else in this README —
+> `main`, the SDK, the local demo, and the [live V3 transactions
+> below](#deployed-hubs-arc-testnet-chain-5042002) — is V3. Run
+> `npm run demo -- --anvil` or `npm run e2e:testnet` locally for the V3 flow.
 
 ## Why this exists
 

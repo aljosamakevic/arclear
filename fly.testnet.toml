@@ -1,8 +1,11 @@
 # Live testnet demo — Arclear dashboard settling REAL rounds on Arc Testnet.
 # Same Dockerfile as the sandbox app; [processes] overrides the image CMD
-# (drops --anvil) so demo/server.ts attaches to the deployed V2 hubs using
-# secrets (ARC_RPC_URL, DEPLOYER_PK, AGENT_MNEMONIC, HUB_V2_USDC, HUB_V2_EURC,
-# PVP_ROUTER, HUB_V2_DEPLOY_BLOCK) set via `flyctl secrets set` — never in git.
+# (drops --anvil) so demo/server.ts attaches to the deployed V3 hubs using
+# secrets (ARC_RPC_URL, DEPLOYER_PK, AGENT_MNEMONIC, HUB_V3_USDC, HUB_V3_EURC,
+# PVP_ROUTER_V3, HUB_V3_DEPLOY_BLOCK) set via `flyctl secrets set` — never in
+# git. These are the names demo/setup.ts actually reads; the V2 names
+# (HUB_V2_*, PVP_ROUTER) are no longer consulted and setup.ts refuses to start
+# without the V3 trio.
 app = "arclear-demo-testnet"
 primary_region = "iad"
 

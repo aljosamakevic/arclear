@@ -1,5 +1,17 @@
 # Arclear v2 kickoff brief — from netting primitive to actual clearinghouse
 
+> **Superseded — v2 kickoff record.** This is the frozen planning brief written
+> *before* v2 was built, kept for provenance. It describes intent, not the
+> shipped system, and several designs here were subsequently redesigned: a
+> 2026-07-27 audit found two redeploy-class flaws in the `redeemIOU` scheme
+> sketched below, so `ClearingHubV3` replaced the root ring and its
+> non-inclusion proofs with party-bound manifest leaves and a permanent
+> on-chain consumption ledger — `redeemIOU(iou, sig)` takes no proofs, and
+> `RING` / `MAX_IOU_LIFETIME` no longer exist. The test counts and contract
+> line counts here are pre-build estimates. For what is actually deployed, read
+> [README.md](../README.md), [PROTOCOL.md](PROTOCOL.md) and
+> [THREAT-MODEL.md](THREAT-MODEL.md).
+
 **How to use this doc:** open a fresh Claude Code session in this repo, run
 `/gsd-new-project`, and when it asks what you're building, paste or reference
 this file (`@docs/V2-BRIEF.md`). Every question GSD asks should be answerable
