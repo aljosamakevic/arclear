@@ -13,7 +13,7 @@ balance, two views).
 ## 1. Install
 
 ```bash
-npm i arclear viem
+npm i arclear-sdk viem
 ```
 
 > **Not yet published to npm.** Until it is, install from a local build —
@@ -24,7 +24,7 @@ npm i arclear viem
 > git clone https://github.com/aljosamakevic/arclear.git
 > cd arclear && npm install && npm run build && npm pack
 > # then, in your project:
-> npm i /path/to/arclear-3.0.0.tgz viem
+> npm i /path/to/arclear-sdk-3.0.0.tgz viem
 > ```
 
 The SDK is viem-only: `viem` is its single runtime dependency, and you'll
@@ -93,7 +93,7 @@ import {
   signConsent,
   USDC,
   MIN_MAX_FEE_PER_GAS,
-} from "arclear";
+} from "arclear-sdk";
 
 const HUB_USDC: Address = "0xfe96A00f14d61F36AcECe69c39eA01C8af02C1ad";
 
@@ -235,7 +235,7 @@ If you want the raw ids (for your own settled/redeemed bookkeeping, which stays
 raw-id-keyed), project them:
 
 ```ts
-import { consumedIds, manifestLeafId } from "arclear";
+import { consumedIds, manifestLeafId } from "arclear-sdk";
 
 const ids = consumedIds(result.consumed);                   // Hex[]
 const leaf = manifestLeafId(ids[0], alice.address, bob.address);

@@ -1,5 +1,5 @@
 {
-  "name": "arclear",
+  "name": "arclear-sdk",
   "version": "3.0.0",
   "description": "Permissionless multilateral obligation-netting clearinghouse primitive for any ERC-20 on Arc — 100 micropayments, 1 settlement.",
   "keywords": [
