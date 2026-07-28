@@ -17,8 +17,15 @@ scannable landing page; the depth lives here. Normative protocol rules live in
   business event. Its canonical id is the EIP-712 digest the debtor signed.
 - **Round** — one atomic settlement: a canonical participant set, index-aligned
   net **deltas** that sum to exactly zero, and a manifest committing to the
-  exact IOU ids consumed. Every affected participant signs the same digest
+  exact obligations consumed. Every affected participant signs the same digest
   over the full arrays.
+- **Manifest leaf** — what a round actually commits per consumed obligation:
+  `keccak256(id ‖ lo ‖ hi)`, where `id` is the IOU's EIP-712 digest and
+  `(lo, hi)` is its debtor/creditor pair sorted by address. Binding the pair is
+  what makes an entry *attributable* — consuming real paper requires both
+  parties to be signing participants of the round. The hub records each leaf in
+  a permanent ledger, and that ledger is the whole of the redemption
+  precondition.
 - **Delta** — a participant's net position in a round, in token base units
   (bigint / int256; no division exists anywhere in the protocol). Negative =
   net debtor (collateral debited), positive = net creditor (collateral
@@ -51,6 +58,23 @@ exposure in this window is bounded and backed four ways:
    (best-effort; races the never-pausable `withdraw`).
 4. **Round frequency** shrinks the credit window.
 
+> **On bound 3, precisely.** On the current `ClearingHubV3` hubs `redeemIOU` is
+> a genuine bound: eligibility is one permanent `consumed[leafId]` storage
+> read, and the only way that bit gets set is a round in which **both** parties
+> of the obligation signed. No third party can manufacture it, erode it, or
+> time it out — the guarantee is history-independent. It remains
+> **best-effort** in exactly one respect, by design: `withdraw` is never
+> pausable, so recovery races a debtor's exit and reaches only posted,
+> still-present collateral. It is a recovery path, not insurance; credit caps
+> are still the exposure bound you size against.
+>
+> On the **superseded `ClearingHubV2` hubs — which are still deployed** — bound
+> 3 is worth zero. Two flaws found in the 2026-07-27 audit let any address
+> permanently disable redemption there, per-IOU or hub-wide, for a few hundred
+> thousand gas. That is what V3 exists to fix. If you are pointed at a V2 hub,
+> size credit on bounds 1, 2 and 4 alone
+> ([THREAT-MODEL.md](THREAT-MODEL.md) rows 28/29).
+
 **Worked example, symmetric ($0 net).** A owes B $500 and B owes A $500 by end
 of day. Net position: **$0 each**. Neither side needs collateral for this pair
 beyond dust; the entire $1,000 of gross obligations cancels and nothing
@@ -77,7 +101,12 @@ structurally harmless:
    has seen and compares the result — participants *never trust* the
    coordinator's arithmetic. A proposal with wrong deltas, a padded
    participant list, or a doctored manifest fails local recomputation and is
-   refused.
+   refused. Every id and every manifest leaf is **re-derived** from the signed
+   IOU, never adopted from the proposal: a coordinator that listed your
+   obligation under somebody else's party pair would commit a leaf the hub
+   never marks consumed for you, so `verifyProposal` requires each entry's leaf
+   to bind its stated parties and each of your consumed obligations to appear
+   under its own pair.
 3. **One digest, signed by everyone.** All participants sign the *same*
    EIP-712 digest over the full position set. A coordinator cannot show
    different data to different signers: any inconsistency produces mismatched
@@ -111,9 +140,11 @@ not *float*; traditional netting does compress float but only inside a
 permissioned operator. These compose rather than compete — net through
 Arclear, settle residuals over whatever rail you like, including Gateway.
 The same composition works across currencies: netting compresses obligations
-*within* a token, and the stateless `PvPRouter` composes the USDC and EURC
+*within* a token, and the stateless `PvPRouterV3` composes the USDC and EURC
 hubs *across* tokens — both legs settle atomically in one transaction or
-neither does, a miniature CLS.
+neither does, a miniature CLS. (A bundle is two rounds in one transaction, so
+budget roughly twice a round's gas and expect to hit a block ceiling at about
+half the manifest size a single round carries.)
 
 ## 5. When netting is NOT worth it
 
