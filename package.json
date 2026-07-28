@@ -37,7 +37,7 @@
   ],
   "sideEffects": false,
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "npm run clean && tsc -p tsconfig.build.json",
     "prepublishOnly": "npm run build && npm test",
     "test": "vitest run",
     "test:contracts": "cd contracts && forge test -vvv",
@@ -48,7 +48,8 @@
     "report": "tsx demo/report.ts",
     "sweep": "tsx demo/sweep.ts",
     "sweep:threshold": "tsx demo/thresholdSweep.ts",
-    "sweep:margin": "tsx demo/marginSweep.ts"
+    "sweep:margin": "tsx demo/marginSweep.ts",
+    "clean": "rm -rf dist"
   },
   "dependencies": {
     "viem": "^2.21.0"
