@@ -1,6 +1,6 @@
 {
   "name": "arclear",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "Permissionless multilateral obligation-netting clearinghouse primitive for any ERC-20 on Arc — 100 micropayments, 1 settlement.",
   "keywords": [
     "arc",
@@ -42,7 +42,6 @@
     "test": "vitest run",
     "test:contracts": "cd contracts && forge test -vvv",
     "fixture": "tsx test/genFixture.ts",
-    "abi": "cp contracts/out/ClearingHub.sol/ClearingHub.json src/abi/ClearingHub.json",
     "e2e:anvil": "tsx demo/e2e.ts --anvil",
     "e2e:testnet": "tsx demo/e2e.ts",
     "demo": "tsx demo/server.ts",
