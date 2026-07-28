@@ -13,6 +13,28 @@ Data sources (committed):
 - `docs/sweep/margin-sweep.csv` — CALB-02 grid, `npm run sweep:margin`
 - `docs/sweep/sweep.csv` — v1 idealized baseline (single-shot netting)
 
+> **Scope note (v3).** Everything measured here is netting- and
+> consent-level — flow shape, per-round uptime, exclude-and-recompute
+> behaviour, EWMA margin coverage — and none of it is affected by the
+> `ClearingHubV2 → ClearingHubV3` redesign, which changed the manifest leaf and
+> the redemption mechanism, not the netting math. The CSVs and every finding
+> below stand as measured.
+>
+> What did change is the **redemption parameter surface this checkpoint still
+> owes a calibration for**: it was `K` (staleness), `RING` (root-buffer depth)
+> and `L` (max IOU lifetime); under V3 it is **`K` alone**. `RING` and `L` were
+> deleted along with the root ring and the coverage rule, so there is no buffer
+> depth and no IOU-lifetime bound left to tune. `K` remains an uncalibrated
+> demo-scale default of 3. Note also that V3 made redemption cost
+> **history-independent**, which removes the RING-vs-cadence trade-off that was
+> the hardest part of the original question. See
+> [PROTOCOL.md → IOU redemption](PROTOCOL.md#iou-redemption).
+>
+> Gas figures are deliberately **not** duplicated here — they live in
+> [PROTOCOL.md → Measured gas](PROTOCOL.md#measured-gas), fitted from
+> `contracts/test/GasScalingV3.t.sol` and `GasScalingPvPV3.t.sol`, which assert
+> the shipped formulas at every measured point.
+
 Tables below transcribe values verbatim from the CSVs (fractions, 4 decimals;
 debits in token base units) — nothing re-rounded, nothing invented.
 
