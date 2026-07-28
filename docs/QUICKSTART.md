@@ -3,7 +3,7 @@
 Netting in ~15 minutes, for a developer with a funded Arc Testnet key. You
 will: deposit collateral into a live hub, sign IOUs off-chain, net them, and
 settle the residual in one transaction. Everything below runs against the
-deployed `ClearingHubV2` hubs — no contract deployment required.
+deployed `ClearingHubV3` hubs — no contract deployment required.
 
 Prerequisite: an Arc Testnet account with USDC. One drip from
 [faucet.circle.com](https://faucet.circle.com/) covers both gas and collateral
@@ -24,7 +24,7 @@ npm i arclear viem
 > git clone https://github.com/aljosamakevic/arclear.git
 > cd arclear && npm install && npm run build && npm pack
 > # then, in your project:
-> npm i /path/to/arclear-2.0.0.tgz viem
+> npm i /path/to/arclear-3.0.0.tgz viem
 > ```
 
 The SDK is viem-only: `viem` is its single runtime dependency, and you'll
@@ -37,15 +37,28 @@ explorer [testnet.arcscan.app](https://testnet.arcscan.app). The SDK defaults
 to this chain — you only pass a `chainId` when targeting something else (e.g.
 a local anvil).
 
-Current `ClearingHubV2` deployments (threshold consent + merkle manifests +
-`redeemIOU`; redemption params K=3 / RING=16 / L=86,400 s are **uncalibrated**
-demo-scale defaults):
+Current `ClearingHubV3` deployments (threshold consent + party-bound merkle
+manifests + proofless O(1) `redeemIOU`; the one redemption parameter, K=3, is
+an **uncalibrated** demo-scale default):
 
 | contract | address |
 | -------- | ------- |
-| USDC hub (`0x3600…0000`) | [`0x3b9a9617b91589a15A14122183e6305D9F0a5a16`](https://testnet.arcscan.app/address/0x3b9a9617b91589a15A14122183e6305D9F0a5a16) |
-| EURC hub (`0x89B5…D72a`) | [`0xECcCD7E43B0Caf4D81420483dEE20E5e258FB85E`](https://testnet.arcscan.app/address/0xECcCD7E43B0Caf4D81420483dEE20E5e258FB85E) |
-| PvPRouter (binds the two hubs above) | [`0x8287dD162e73f1a1DD15774dDc8A4137a2d3fE8c`](https://testnet.arcscan.app/address/0x8287dD162e73f1a1DD15774dDc8A4137a2d3fE8c) |
+| USDC hub (`0x3600…0000`) | [`0xfe96A00f14d61F36AcECe69c39eA01C8af02C1ad`](https://testnet.arcscan.app/address/0xfe96A00f14d61F36AcECe69c39eA01C8af02C1ad) |
+| EURC hub (`0x89B5…D72a`) | [`0x79ea853CcaA1FE41f7EDc26469AeAFD905676Fb5`](https://testnet.arcscan.app/address/0x79ea853CcaA1FE41f7EDc26469AeAFD905676Fb5) |
+| PvPRouterV3 (binds the two hubs above) | [`0xb69596295AdB785571eeA1eAed9aeD162A510d42`](https://testnet.arcscan.app/address/0xb69596295AdB785571eeA1eAed9aeD162A510d42) |
+
+All three are source-verified on the Arc Blockscout explorer. The V2 hubs and
+the V2 `PvPRouter` remain deployed but are **superseded** — their redemption
+path is defeatable by any party (see the README's hub lineage table and
+[THREAT-MODEL.md](THREAT-MODEL.md) rows 28/29). Point new integrations at the
+V3 addresses above.
+
+> **Migrating from V2?** Four things changed at the API surface:
+> `net()` returns `consumed: ConsumedIou[]` rather than `consumedIds: Hex[]`;
+> `RoundProposal.consumedIds` became `.consumed`; `redeemIOU` lost its proofs
+> argument; and `prepareRedemptionProofs` is gone — use `consumed(leafId)` or
+> `isConsumed(iou)`. The EIP-712 hub domain, the `IOU` and `Round` structs and
+> every signing call are **unchanged**. Details in each section below.
 
 > **Gas-token gotcha:** because USDC is the gas token, letting gas estimation
 > run reserves your *whole* balance and makes simulated token transfers revert
@@ -82,7 +95,7 @@ import {
   MIN_MAX_FEE_PER_GAS,
 } from "arclear";
 
-const HUB_USDC: Address = "0x3b9a9617b91589a15A14122183e6305D9F0a5a16";
+const HUB_USDC: Address = "0xfe96A00f14d61F36AcECe69c39eA01C8af02C1ad";
 
 const alice = privateKeyToAccount(process.env.ALICE_PK as Hex);
 const bob = privateKeyToAccount(process.env.BOB_PK as Hex);
@@ -161,12 +174,18 @@ const signedByBob = await signIou(
 ```
 
 **The L lifetime convention:** `signIou` refuses any IOU with
-`expiry > now + L` (L defaults to 86,400 s, mirroring the hub's
-`MAX_IOU_LIFETIME`). Honoring it is what makes the hub's redemption coverage
-rule complete for honest debtors — a debtor who violates it weakens only their
-own double-claim protection. Also note the netting engine drops IOUs expiring
-within its safety window (default 60 s), so keep expiries comfortably ahead of
-settlement.
+`expiry > now + L` (`DEFAULT_MAX_IOU_LIFETIME_SECONDS`, 86,400 s). Under V3
+this is an **off-chain hygiene convention only** — no contract reads `L`. It
+was load-bearing on V2, whose redemption coverage rule compared a buffered
+timestamp against `expiry − L`; V3 deleted both the rule and the immutable, so
+violating the convention no longer weakens anyone's redemption protection. It
+is kept because bounding how long signed paper sits outstanding still bounds
+the window in which a debtor's collateral must remain sufficient. Override per
+call with `opts.maxIouLifetimeSeconds`, or check without signing via
+`checkIouLifetime(iou, { now })`.
+
+Also note the netting engine drops IOUs expiring within its safety window
+(default 60 s), so keep expiries comfortably ahead of settlement.
 
 ### 3.4 Net and build the proposal
 
@@ -185,10 +204,47 @@ const result = net(ious, { now, hub: HUB_USDC });
 // result.participants: strictly ascending addresses
 // result.deltas: index-aligned, sums to exactly 0n; negative = net debtor
 // Here: Alice -500_000n, Bob +500_000n — the 0.75 reciprocal portion cancelled.
+// result.consumed: ConsumedIou[] — see below
+// result.grossVolume / result.settledVolume: bigint base units
 
 const roundNonce = await hub.roundNonce();
 const proposal = buildProposal(HUB_USDC, roundNonce, result);
+// proposal.digest       — the EIP-712 digest every participant signs
+// proposal.manifestHash — merkle root over the consumed set's leaves
+// proposal.consumed     — ConsumedIou[], ascending by leafId
 ```
+
+**The consumed set (changed in v3).** `net()` returns
+`consumed: ConsumedIou[]`, not `consumedIds: Hex[]`, and `RoundProposal` carries
+`.consumed` rather than `.consumedIds`. Each entry is:
+
+```ts
+interface ConsumedIou {
+  id: Hex;         // hashIou(iou) — also the hub's redemption-nullifier key
+  debtor: Address;
+  creditor: Address;
+  leafId: Hex;     // manifestLeafId(id, debtor, creditor) — the manifest leaf
+}                  // AND the key of the hub's permanent `consumed` ledger
+```
+
+The set is sorted ascending **by `leafId`**, not by raw id — that is the order
+the contract's merkle builder sees. Every field is *derived*: recompute and
+compare, never adopt a coordinator's copy.
+
+If you want the raw ids (for your own settled/redeemed bookkeeping, which stays
+raw-id-keyed), project them:
+
+```ts
+import { consumedIds, manifestLeafId } from "arclear";
+
+const ids = consumedIds(result.consumed);                   // Hex[]
+const leaf = manifestLeafId(ids[0], alice.address, bob.address);
+```
+
+The calldata form — `ConsumedRef { id, partyAIdx, partyBIdx }`, the two indices
+pointing into `participants` — is derived at submission time by
+`HubClient.executeRound`, so you never construct it by hand. (`consumedRefs(participants, consumed)`
+is exported if you are building the transaction yourself.)
 
 ### 3.5 Verify and consent — every participant, independently
 
@@ -209,9 +265,25 @@ const bobSig = await signConsent(HUB_USDC, proposal, bob); // bob verifies his c
 ```
 
 If you sign consents for multiple concurrent proposals, also pass
-`pendingConsumedIds` (the consumed ids of your outstanding unconfirmed
-consents) — `verifyProposal` will refuse overlaps that could double-settle
-your paper.
+`pendingConsumedIds` (the **raw ids** of your outstanding unconfirmed consents,
+i.e. `new Set(consumedIds(otherProposal.consumed))`) — `verifyProposal` will
+refuse overlaps that could double-settle your paper.
+
+`verifyProposal` is **total**: any malformed proposal returns
+`{ ok: false, reason }`, never throws, so an auto-consent daemon gets a refusal
+rather than a crash. Refusal reasons you may see, beyond the v2 set
+(`roundNonce mismatch`, `delta mismatch`, `self not in participant set`,
+`manifestHash does not match the consumed set`, `digest does not match proposal
+contents`):
+
+| Reason | Meaning |
+| ------ | ------- |
+| `consumed id X: debtor/creditor Y is not a participant` | the entry names a party the round does not list, so the hub would revert |
+| `consumed id X: debtor and creditor are the same party` | no IOU has one party; the hub rejects it as `SelfConsumedRef` |
+| `consumed id X: leafId does not bind the stated parties` | the cached leaf is not what those two addresses derive — a manifest that looks self-consistent but attributes paper to somebody else |
+| `my consumed id X is missing from the proposal manifest` | your own recomputation consumed this obligation but the manifest does not carry **its** leaf; consenting would leave your paper live under a round claiming to have netted it |
+| `consumed id X overlaps an outstanding unconfirmed consent` | the `pendingConsumedIds` guard |
+| `malformed proposal: …` | the totality wrapper — bad hex, out-of-range int256, unsortable manifest |
 
 ### 3.6 Execute the round
 
@@ -240,28 +312,74 @@ An unresponsive participant can't stall settlement (threshold consent excludes
 and recomputes), and their creditors aren't stranded: a creditor holding a
 signed IOU from a debtor who stopped consenting can recover the amount
 directly from that debtor's posted collateral via `redeemIOU`, after K
-executed rounds have passed without the IOU settling. The SDK assembles the
-required merkle non-inclusion proofs from public calldata — no coordinator
-trust:
+executed rounds in which that debtor settled nothing.
+
+**Under v3 this takes no proofs.** `prepareRedemptionProofs` no longer exists —
+the hub gates on a single permanent storage read:
 
 ```ts
-const proofs = await hub.prepareRedemptionProofs(signedByAlice.id);
-await hub.redeemIOU(bobWallet, signedByAlice.iou, signedByAlice.signature, proofs);
+// Two O(1) reads decide it. Either form works:
+const alreadyNetted = await hub.isConsumed(signedByAlice.iou);
+// …or, if you're holding the leaf rather than the IOU:
+// const alreadyNetted = await hub.consumed(leafId);
+
+const stale =
+  (await hub.roundNonce()) >= (await hub.lastRound(alice.address)) + (await hub.K());
+
+if (!alreadyNetted && stale && !(await hub.redeemed(signedByAlice.id))) {
+  await hub.redeemIOU(bobWallet, signedByAlice.iou, signedByAlice.signature);
+}
 ```
 
-This is **best-effort by design** — it races the never-pausable `withdraw`,
-and the K/RING/L parameters are uncalibrated demo defaults. Spec and honesty
-notes: [PROTOCOL.md → IOU redemption](PROTOCOL.md#iou-redemption).
+Note the signature: `redeemIOU(wallet, iou, sig)` — three arguments. The V2
+`proofs` parameter is gone, along with the root ring, the `expiry − L` coverage
+rule, and the TOCTOU window where a round landing mid-flight invalidated your
+proofs. Cost is a flat, **history-independent** 150,000 gas limit
+(`REDEEM_IOU_GAS`), measured at 82,003 total whether the hub has seen 4 rounds
+or 64.
+
+Two properties worth relying on:
+
+- **Permanent.** Nothing evicts, expires or rewrites a `consumed` entry, so an
+  unnetted IOU stays redeemable for as long as the debtor's collateral lasts.
+  There is no window to miss.
+- **Unforgeable by third parties.** The ledger is keyed on the *party-bound*
+  leaf, so the only way your obligation gets marked consumed is a round in which
+  **you** signed. On V2, any address could mark it consumed for a few hundred
+  thousand gas — which is why V3 exists.
+
+Still **best-effort in one respect, by design**: `withdraw` is never pausable,
+so redemption races a debtor's exit and reaches only posted, still-present
+collateral. Credit caps remain the exposure bound. `K` is an uncalibrated
+demo-scale default of 3. Spec and honesty notes:
+[PROTOCOL.md → IOU redemption](PROTOCOL.md#iou-redemption).
+
+> **Auditing a round's manifest** is a separate concern from redemption now.
+> `hub.fetchManifest(nonce)` still reconstructs which obligations a round
+> extinguished — and, new in v3, under which party pair — from public calldata
+> alone, decoding both direct `executeRound` and `PvPRouterV3.executePvP`
+> shapes and confirming the leg against the root the chain logged. On live Arc,
+> construct the client with the hub's deploy block, since the public RPC prunes
+> history and rejects from-genesis scans:
+> `new HubClient(HUB_USDC, pub, { earliestBlock: 54004274n })`.
 
 ## 5. Cross-currency PvP
 
-Netting compresses obligations *within* a token; the `PvPRouter` composes the
+Netting compresses obligations *within* a token; the `PvPRouterV3` composes the
 USDC and EURC hubs *across* tokens — two leg proposals plus a signed FX rate
 settle atomically in one transaction (payment-vs-payment, a miniature CLS).
 The SDK covers the whole flow: `buildPvPProposal`, `verifyPvPProposal` (per-leg
 re-verification + cross-multiplied rate checks — no division), `signPvPConsent`,
 and `PvPRouterClient.executePvP`. Spec:
 [PROTOCOL.md → Cross-currency PvP rounds](PROTOCOL.md#cross-currency-pvp-rounds).
+
+Two v3 notes. The bundle's EIP-712 domain is **`("ArclearPvPRouterV3", "1")`**,
+so a consent signed for the V2 router is not valid here and vice versa — even
+though the `PvPRound` typehash is byte-identical. And **a bundle is two rounds
+in one transaction**: at the demo's 105 consumed entries per leg it needs ~7.3M
+gas, so it hits a block ceiling at roughly half the manifest size a single
+round carries. Size accordingly before assuming a manifest one hub handles
+comfortably will fit in a bundle.
 
 ## 6. Run the full demo locally
 
